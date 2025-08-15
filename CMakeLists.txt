@@ -9,6 +9,10 @@ file(GLOB_RECURSE RUNTIME_SOURCES
     include/*.h
 )
 
+if(WIN32)
+    list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/app.rc)
+endif()
+
 add_executable(CrystalRuntime ${RUNTIME_SOURCES})
 
 target_include_directories(CrystalRuntime PRIVATE

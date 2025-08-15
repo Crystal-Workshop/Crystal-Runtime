@@ -42,7 +42,7 @@ int APIENTRY WinMain(HINSTANCE /*hInstance*/, // Fixed: Remove unused parameter 
     int argc = __argc;
     char** argv = __argv;
     if(argc < 2) {
-        std::cout << "Usage: SimpleRuntime <scene.cgame>\n";
+        std::cout << "Usage: Crystal - <scene.cgame>\n";
         return 1;
     }
     std::string archivePath = argv[1];
