@@ -1,0 +1,40 @@
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake.user
+Testing/
+CTestTestfile.cmake
+_build/
+_build*/
+_build-*/
+
+# Visual Studio
+*.sln
+*.vcxproj*
+*.user
+*.ipch
+*.opensdf
+*.sdf
+*.unsuccessfulbuild
+*.ncb
+*.suo
+*.vcxproj.filters
+*.pdb
+*.idb
+*.obj
+*.ilk
+*.iobj
+*.ipdb
+*.tlog/
+*.lastbuildstate
+*.log
+
+# Build
+Release/
+Debug/
+x64/
+bin/
+lib/
+_deps/
