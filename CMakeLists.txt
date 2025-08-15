@@ -47,21 +47,29 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glfw)
 
-# Lua (marovira/lua with static build and no tests)
-set(LUA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(LUA_BUILD_AS_DLL OFF CACHE BOOL "" FORCE)
+# Lua
+
 FetchContent_Declare(
     lua
-    GIT_REPOSITORY https://github.com/marovira/lua
-    GIT_TAG        4737fb9
+    GIT_REPOSITORY "https://github.com/marovira/lua"
+    GIT_TAG "4737fb9"
 )
+
+set(LUA_BUILD_AS_DLL OFF CACHE BOOL "" FORCE)
+set(LUA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(LUA_ENABLE_STATIC_LIB ON CACHE BOOL "" FORCE)  # Ensure it builds a static library
+
 FetchContent_MakeAvailable(lua)
-# set(LUA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-# set(LUA_BUILD_AS_DLL OFF CACHE BOOL "" FORCE)
+
+# Lua headers
+target_include_directories(CrystalRuntime PRIVATE ${lua_SOURCE_DIR}/src)
+
+# Lua library
+target_link_libraries(CrystalRuntime PRIVATE lua::lua)
 
 # glad
 add_library(glad external/glad/src/glad.c)
 target_include_directories(glad PUBLIC external/glad/include)
 
 # Link everything
-target_link_libraries(CrystalRuntime PRIVATE glad glfw glm lua)
+target_link_libraries(CrystalRuntime PRIVATE glad glfw glm)

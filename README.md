@@ -9,6 +9,6 @@ Open Powershell at your project directory
 Step 3:
 Run ``cmake -G "Visual Studio 17 2022"``
 Step 4:
-Run ``cmake -B build -S .``
+Run ``cmake --build . --config Release``
 Step 5:
 Open a .crg file

@@ -23,11 +23,13 @@
 #include "lua_thread.h"
 #include "input.h"
 extern "C" {
-#include "lua.h"
-#include "lauxlib.h"
-#include "lualib.h"
-#include <windows.h>
-#include <cstdlib>
+    #include "lauxlib.h"
+    #include "lualib.h"
+    #include <windows.h>
+    #include <cstdlib>
+    #include "lua.h"
+    #include "lauxlib.h"
+    #include "lualib.h"
 }
 // Forward declarations to get shader sources defined in shader.cpp
 extern const char* getDefaultVS();

@@ -3,10 +3,15 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
-#include "lua.hpp"
 #include "datamodel.h"
 #include "archive.h"
 #include "input.h"
+extern "C" {
+    #include "lua.h"
+    #include "lauxlib.h"
+    #include "lualib.h"
+}
+
 // Forward declaration from lua_bind.cpp
 void registerPlaceGlobal(lua_State* L, DataModel* dataModel);
 void registerServiceGlobal(lua_State* L, InputState* inputState);

@@ -5,10 +5,16 @@
 #include <iostream>
 #include <string>
 #include <cstring>
-#include "lua.hpp"
 #include "datamodel.h"
-#include "scene.h" // SceneObject/Light definitions
+#include "scene.h"
 #include "input.h"
+
+extern "C" {
+    #include "lua.h"
+    #include "lauxlib.h"
+    #include "lualib.h"
+}
+
 
 // Global pointer (declared in datamodel.cpp). We use it when registerPlaceGlobal passes dm.
 extern DataModel* m_dataModel;
