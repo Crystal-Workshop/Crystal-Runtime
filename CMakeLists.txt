@@ -13,7 +13,9 @@ if(WIN32)
     list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/app.rc)
 endif()
 
-add_executable(CrystalRuntime ${RUNTIME_SOURCES})
+add_library(CrystalRuntime SHARED ${RUNTIME_SOURCES})
+
+target_compile_definitions(CrystalRuntime PRIVATE CRYSTAL_BUILD_SHARED=1)
 
 target_include_directories(CrystalRuntime PRIVATE
     ${CMAKE_SOURCE_DIR}/include
