@@ -36,13 +36,7 @@ extern const char* getDefaultVS();
 extern const char* getDefaultFS();
 void registerPlaceGlobal(lua_State* L, DataModel* dataModel);
 void registerServiceGlobal(lua_State* L, InputState* inputState);
-int APIENTRY WinMain(HINSTANCE /*hInstance*/, // Fixed: Remove unused parameter names
-                     HINSTANCE /*hPrevInstance*/,
-                     LPSTR     /*lpCmdLine*/,
-                     int       /*nCmdShow*/)
-{
-    int argc = __argc;
-    char** argv = __argv;
+int main(int argc, char** argv) {
     if(argc < 2) {
         std::cout << "Usage: Crystal - <scene.cgame>\n";
         return 1;

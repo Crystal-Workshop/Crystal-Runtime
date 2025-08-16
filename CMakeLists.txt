@@ -24,7 +24,6 @@ target_include_directories(CrystalRuntime PRIVATE
 
 if(MSVC)
     target_compile_options(CrystalRuntime PRIVATE /W4 /permissive-)
-    set_target_properties(CrystalRuntime PROPERTIES WIN32_EXECUTABLE YES)
 else()
     target_compile_options(CrystalRuntime PRIVATE -Wall -Wextra -Wpedantic)
 endif()
