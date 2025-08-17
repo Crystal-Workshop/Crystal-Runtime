@@ -14,10 +14,11 @@ add_library(CrystalRuntime SHARED ${RUNTIME_SOURCES})
 target_compile_definitions(CrystalRuntime PRIVATE CRYSTAL_BUILD_SHARED=1)
 
 target_include_directories(CrystalRuntime PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    third_party/glad/include
-    third_party/glfw/include
-    third_party/glm
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/glad/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/glfw/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/glm
 )
 
 if(MSVC)
