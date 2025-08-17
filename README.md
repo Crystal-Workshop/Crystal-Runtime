@@ -1,14 +1,4 @@
 # Crystal Runtime
-### All-In-One C++ runtime for games, using the .crg file format
+### C++ runtime for the crystal system.
 
-## Setup Steps
-Step 1:
-[Install CMake](https://cmake.org/download/)
-Step 2: 
-Open Powershell at your project directory
-Step 3:
-Run ``cmake -G "Visual Studio 17 2022"``
-Step 4:
-Run ``cmake --build . --config Release``
-Step 5:
-Open a .crg file
+This repository exists to allow you to integrate the Crystal Runtime with your projects. To install and use crystal with already built projects, visit [Crystal Player](https://github.com/Crystal-Workshop/Crystal-Player)
