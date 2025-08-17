@@ -9,10 +9,6 @@ file(GLOB_RECURSE RUNTIME_SOURCES
     include/*.h
 )
 
-if(WIN32)
-    list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/app.rc)
-endif()
-
 add_library(CrystalRuntime SHARED ${RUNTIME_SOURCES})
 
 target_compile_definitions(CrystalRuntime PRIVATE CRYSTAL_BUILD_SHARED=1)
