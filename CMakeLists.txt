@@ -11,6 +11,13 @@ file(GLOB_RECURSE RUNTIME_SOURCES
 
 add_library(CrystalRuntime SHARED ${RUNTIME_SOURCES})
 
+set_target_properties(CrystalRuntime PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${CMAKE_SOURCE_DIR}/../Debug"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/../Release"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_SOURCE_DIR}/../RelWithDebInfo"
+    RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_SOURCE_DIR}/../MinSizeRel"
+)
+
 target_compile_definitions(CrystalRuntime PRIVATE CRYSTAL_BUILD_SHARED=1)
 
 target_include_directories(CrystalRuntime PRIVATE
