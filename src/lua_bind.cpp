@@ -1,13 +1,14 @@
 // lua_bind.cpp
 // Single-file, robust binding that exposes `place.<name>` and live Vec3 proxies
-// for position/rotation/scale/color. Includes debug prints to help trace issues.
-
+// for position/rotation/scale/color.
 #include <iostream>
 #include <string>
 #include <cstring>
 #include "datamodel.h"
 #include "scene.h"
 #include "input.h"
+#include <glm/glm.hpp>
+#include <GLFW/glfw3.h>
 
 extern "C" {
     #include "lua.h"
@@ -16,18 +17,15 @@ extern "C" {
 }
 
 
-// Global pointer (declared in datamodel.cpp). We use it when registerPlaceGlobal passes dm.
+// Global pointer (declared in datamodel.cpp).
 extern DataModel* m_dataModel;
-
 // We'll keep a local global pointer for InputState in this translation unit.
 static InputState* g_inputState = nullptr;
-
 // ObjectRef: userdata for an object
 struct ObjectRef {
     std::string name;
     DataModel* dm;
 };
-
 // Vec3Ref: userdata for a specific vec3 property of an object
 struct Vec3Ref {
     std::string name;
@@ -41,7 +39,6 @@ static int objectref_newindex(lua_State* L);
 static int vec3ref_index(lua_State* L);
 static int vec3ref_newindex(lua_State* L);
 static int place_index(lua_State* L);
-
 // -------------------- helpers --------------------
 static bool parseVec3FromLua(lua_State* L, int idx, glm::vec3 &out) {
     if(lua_type(L, idx) == LUA_TTABLE) {
@@ -60,7 +57,8 @@ static bool parseVec3FromLua(lua_State* L, int idx, glm::vec3 &out) {
         float x = (float)lua_tonumber(L,-1); lua_pop(L,1);
         lua_getfield(L, idx, "y"); if(!lua_isnumber(L,-1)) { lua_pop(L,1); return false; }
         float y = (float)lua_tonumber(L,-1); lua_pop(L,1);
-        lua_getfield(L, idx, "z"); if(!lua_isnumber(L,-1)) { lua_pop(L,1); return false; }
+        lua_getfield(L, idx, "z");
+        if(!lua_isnumber(L,-1)) { lua_pop(L,1); return false; }
         float z = (float)lua_tonumber(L,-1); lua_pop(L,1);
         out = glm::vec3(x,y,z);
         return true;
@@ -131,17 +129,12 @@ static int vec3ref_newindex(lua_State* L) {
 
 // -------------------- ObjectRef metamethods --------------------
 static int objectref_index(lua_State* L) {
-    std::cout << "existing object indexed";
     ObjectRef* ref = (ObjectRef*)luaL_checkudata(L, 1, "CGame.ObjectRef");
     const char* key = luaL_checkstring(L, 2);
-
-    std::cout << "[objectref_index] name='" << ref->name << "' key='" << key << "' dm=" << ref->dm << std::endl;
-
     if(!ref || !ref->dm) { lua_pushnil(L); return 1; }
 
     auto maybeObj = ref->dm->getObjectCopy(ref->name);
     if(!maybeObj) {
-        std::cout << "[objectref_index] object '" << ref->name << "' not found in DataModel\n";
         lua_pushnil(L);
         return 1;
     }
@@ -180,7 +173,6 @@ static int objectref_index(lua_State* L) {
 }
 
 static int objectref_newindex(lua_State* L) {
-    std::cout << "new object indexed";
     ObjectRef* ref = (ObjectRef*)luaL_checkudata(L, 1, "CGame.ObjectRef");
     const char* key = luaL_checkstring(L, 2);
     if(!ref || !ref->dm) return 0;
@@ -215,11 +207,8 @@ static int objectref_newindex(lua_State* L) {
 // -------------------- place.__index --------------------
 static int place_index(lua_State* L) {
     const char* name = luaL_checkstring(L, 2);
-    std::cout << "[place_index] asked for '" << name << "'" << std::endl;
-
     // use global pointer provided by registerPlaceGlobal
     if(m_dataModel == nullptr) {
-        std::cout << "[place_index] ERROR: global m_dataModel == nullptr\n";
         lua_pushnil(L);
         return 1;
     }
@@ -227,9 +216,9 @@ static int place_index(lua_State* L) {
     // Try find object
     auto maybeObj = m_dataModel->getObjectCopy(name);
     if (!maybeObj) {
-        std::cout << "[place_index] ERROR: object '" << name << "' not found in DataModel. Returning nil.\n";
         lua_pushnil(L); // Return nil for this lookup
-        return 1;      // and do not modify the DataModel
+        return 1;
+    // and do not modify the DataModel
     }
 
     // push ObjectRef userdata
@@ -239,7 +228,6 @@ static int place_index(lua_State* L) {
     ref->dm = m_dataModel;
     luaL_getmetatable(L, "CGame.ObjectRef");
     lua_setmetatable(L, -2);
-    std::cout << "[place_index] returning ObjectRef for '" << name << "'\n";
     return 1;
 }
 
@@ -247,18 +235,17 @@ static int place_index(lua_State* L) {
 void registerPlaceGlobal(lua_State* L, DataModel* dataModel) {
     // set global pointer
     m_dataModel = dataModel;
-    std::cout << "[registerPlaceGlobal] registered on L=" << (void*)L << " dm=" << (void*)m_dataModel << std::endl;
-
     // ObjectRef metatable
     if(luaL_newmetatable(L, "CGame.ObjectRef")) {
-        lua_pushcfunction(L, objectref_index); lua_setfield(L, -2, "__index");
+        lua_pushcfunction(L, objectref_index);
+        lua_setfield(L, -2, "__index");
         lua_pushcfunction(L, objectref_newindex); lua_setfield(L, -2, "__newindex");
     }
     lua_pop(L, 1);
-
     // Vec3Ref metatable
     if(luaL_newmetatable(L, "CGame.Vec3Ref")) {
-        lua_pushcfunction(L, vec3ref_index); lua_setfield(L, -2, "__index");
+        lua_pushcfunction(L, vec3ref_index);
+        lua_setfield(L, -2, "__index");
         lua_pushcfunction(L, vec3ref_newindex); lua_setfield(L, -2, "__newindex");
 
         // __tostring for nice prints
@@ -267,12 +254,14 @@ void registerPlaceGlobal(lua_State* L, DataModel* dataModel) {
             if(!ref || !ref->dm) { lua_pushstring(L, "nil"); return 1; }
             auto maybeObj = ref->dm->getObjectCopy(ref->name);
             if(!maybeObj) { lua_pushstring(L, "nil"); return 1; }
-            glm::vec3 val;
+     
+           glm::vec3 val;
             switch(ref->field) {
                 case Vec3Ref::POSITION: val = maybeObj->position; break;
                 case Vec3Ref::ROTATION: val = maybeObj->rotation; break;
                 case Vec3Ref::SCALE:    val = maybeObj->scale;    break;
-                case Vec3Ref::COLOR:    val = maybeObj->color;    break;
+          
+              case Vec3Ref::COLOR:    val = maybeObj->color;    break;
             }
             char buf[64];
             snprintf(buf, sizeof(buf), "(%.3f, %.3f, %.3f)", val.x, val.y, val.z);
@@ -290,8 +279,6 @@ void registerPlaceGlobal(lua_State* L, DataModel* dataModel) {
     lua_setfield(L, -2, "__index");
     lua_setmetatable(L, -2);
     lua_setglobal(L, "place");
-
-    std::cout << "[registerPlaceGlobal] place global registered\n";
 }
 
 // -------------------- service.input:GetKeyDown  --------------------
@@ -305,9 +292,6 @@ static int lua_service_input_GetKeyDown(lua_State* L) {
         return 1;
     }
 
-    // Allow call patterns:
-    // service.input:GetKeyDown("A")  -- colon (self passed as first arg)
-    // service.input.GetKeyDown("A")  -- dot (no self)
     const char* name = nullptr;
     if(lua_isstring(L, 1)) {
         name = lua_tostring(L, 1);
@@ -323,27 +307,77 @@ static int lua_service_input_GetKeyDown(lua_State* L) {
     return 1;
 }
 
-void registerServiceGlobal(lua_State* L, InputState* inputState) {
-    // store pointer locally for this translation unit (not strictly necessary but convenient)
-    g_inputState = inputState;
+// -------------------- service.input:GetMousePosition  --------------------
+static int lua_service_input_GetMousePosition(lua_State* L) {
+    void* ud = lua_touserdata(L, lua_upvalueindex(1));
+    InputState* input = (InputState*)ud;
+    if (!input) {
+        lua_pushnil(L);
+        return 1;
+    }
+    glm::vec2 pos = input->getMousePosition();
+    lua_newtable(L);
+    lua_pushnumber(L, pos.x);
+    lua_setfield(L, -2, "x");
+    lua_pushnumber(L, pos.y);
+    lua_setfield(L, -2, "y");
+    return 1;
+}
 
+void registerServiceGlobal(lua_State* L, InputState* inputState) {
+    g_inputState = inputState;
     // Make service table
     lua_newtable(L); // service
 
     // make input table
-    lua_newtable(L); // input
+    lua_newtable(L);
+    // input
 
-    // Push input pointer as lightuserdata upvalue for the function
+    // Push input pointer as lightuserdata upvalue for GetKeyDown
     lua_pushlightuserdata(L, (void*)inputState);
     lua_pushcclosure(L, lua_service_input_GetKeyDown, 1);
-    // set GetKeyDown
     lua_setfield(L, -2, "GetKeyDown");
+
+    // Push input pointer as lightuserdata upvalue for GetMousePosition
+    lua_pushlightuserdata(L, (void*)inputState);
+    lua_pushcclosure(L, lua_service_input_GetMousePosition, 1);
+    lua_setfield(L, -2, "GetMousePosition");
 
     // set input table on service
     lua_setfield(L, -2, "input");
-
     // set service global
     lua_setglobal(L, "service");
+}
 
-    std::cout << "[registerServiceGlobal] service.input registered (L=" << (void*)L << ", inputState=" << (void*)inputState << ")\n";
+// -------------------- screen:GetViewportSize --------------------
+static int lua_screen_GetViewportSize(lua_State* L) {
+    void* ud = lua_touserdata(L, lua_upvalueindex(1));
+    GLFWwindow* wnd = (GLFWwindow*)ud;
+    if (!wnd) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    int width, height;
+    glfwGetFramebufferSize(wnd, &width, &height);
+
+    lua_newtable(L);
+    lua_pushnumber(L, width);
+    lua_setfield(L, -2, "x");
+    lua_pushnumber(L, height);
+    lua_setfield(L, -2, "y");
+    return 1;
+}
+
+void registerScreenGlobal(lua_State* L, GLFWwindow* wnd) {
+    // Make screen table
+    lua_newtable(L);
+
+    // Push GetViewportSize function
+    lua_pushlightuserdata(L, (void*)wnd);
+    lua_pushcclosure(L, lua_screen_GetViewportSize, 1);
+    lua_setfield(L, -2, "GetViewportSize");
+
+    // set screen global
+    lua_setglobal(L, "screen");
 }
