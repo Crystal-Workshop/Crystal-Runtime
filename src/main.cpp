@@ -82,7 +82,7 @@ return 1;
     parseSceneXml(sceneXml, parsedObjects, lights);
     std::cout << "--- Parsed Object Names ---\n";
 for (const SceneObject& obj : parsedObjects) {
-        std::cout << "Found object with name: '" << obj.name << "'\n";
+        std::cout << "Found object with name: '" << obj.name << "' type: '" << obj.type << "'\n";
 }
     std::cout << "---------------------------\n";
 
@@ -154,12 +154,20 @@ glfwDestroyWindow(wnd);
         return 1;
 }
 
-    // Light setup (fallback if none in scene)
+    // Light setup - now dynamically find first light object
     glm::vec3 lightPos(0, 10, 0), lightColor(1, 1, 1);
-if (!lights.empty()) {
-        lightPos = lights[0].position;
-        lightColor = lights[0].color * lights[0].intensity;
-}
+    
+    // Look for the first light object in the scene
+    auto allObjects = dm.getAllObjects();
+    for (const SceneObject& obj : allObjects) {
+        if (obj.type == "light") {
+            lightPos = obj.position;
+            lightColor = obj.color * obj.intensity;
+            std::cout << "Using light object '" << obj.name << "' at position (" 
+                      << lightPos.x << ", " << lightPos.y << ", " << lightPos.z << ")\n";
+            break;
+        }
+    }
 
     // Load meshes from archive
     std::unordered_map<std::string, MeshGL> meshCache;
@@ -238,6 +246,16 @@ glm::vec3 up = rotMat * glm::vec4(0, 1, 0, 0);
         glm::mat4 view = glm::lookAt(camPos, camPos + forward, up);
 glm::mat4 proj = glm::perspective(glm::radians(camFov), (float)w/(float)h, 0.1f, 100.0f);
 
+        // Update light position dynamically from scene objects
+        auto currentObjects = dm.getAllObjects();
+        for (const SceneObject& obj : currentObjects) {
+            if (obj.type == "light") {
+                lightPos = obj.position;
+                lightColor = obj.color * obj.intensity;
+                break; // Use first light found
+            }
+        }
+
         GLint locModel = glGetUniformLocation(program, "uModel");
         GLint locView  = glGetUniformLocation(program, "uView");
 GLint locProj  = glGetUniformLocation(program, "uProj");
@@ -252,7 +270,7 @@ glUniform3fv(locCamPos, 1, &camPos[0]);
         glUniform3fv(locLightPos, 1, &lightPos[0]);
         glUniform3fv(locLightCol, 1, &lightColor[0]);
 
-        // Draw objects
+        // Draw objects (including lights if they have meshes)
         for (const SceneObject& obj : dm.getAllObjects()) {
             glm::mat4 M(1.0f);
 M = glm::translate(M, obj.position);

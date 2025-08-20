@@ -44,14 +44,17 @@ void parseSceneXml(const std::string &xml, std::vector<SceneObject> &outObjects,
         if(!inten.empty()) { 
             obj.intensity = std::stof(inten); 
         }
+        
+        // Always add to objects list first
+        outObjects.push_back(obj);
+        
+        // If it's a light type, also add to lights list for rendering compatibility
         if(obj.type == "light") {
             Light light;
             light.position = obj.position;
             light.color = obj.color;
             light.intensity = obj.intensity;
             outLights.push_back(light);
-        } else {
-            outObjects.push_back(obj);
         }
     }
 }
