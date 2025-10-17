@@ -5,7 +5,7 @@ use std::time::Duration;
 use glam::{Vec2, Vec3};
 use mlua::{
     FromLua, IntoLua, Lua, MultiValue, Result as LuaResult, Table, UserData, UserDataFields,
-    UserDataMethods, Value, Variadic, AnyUserData,
+    UserDataMethods, Value, Variadic,
 };
 
 use crate::data_model::DataModel;
@@ -51,9 +51,30 @@ pub(super) fn register_globals(lua: &Lua, context: &ScriptContext) -> LuaResult<
     println!("Registering Globals");
     register_print(lua)?;
     register_wait(lua, Arc::clone(&context.running))?;
+    register_datatypes(lua)?;
     register_scene(lua, context)?;
     register_service(lua, context)?;
     register_screen(lua, context)?;
+    Ok(())
+}
+
+fn register_datatypes(lua: &Lua) -> LuaResult<()> {
+    let vector3 = lua.create_table()?;
+    vector3.set(
+        "new",
+        lua.create_function(|_, (x, y, z): (f32, f32, f32)| {
+            Ok(LuaVector3::new(Vec3::new(x, y, z)))
+        })?,
+    )?;
+    lua.globals().set("Vector3", vector3)?;
+
+    let color3 = lua.create_table()?;
+    color3.set(
+        "new",
+        lua.create_function(|_, (r, g, b): (f32, f32, f32)| Ok(LuaColor3::from_rgb(r, g, b)))?,
+    )?;
+    lua.globals().set("Color3", color3)?;
+
     Ok(())
 }
 
@@ -112,7 +133,7 @@ fn register_scene(lua: &Lua, context: &ScriptContext) -> LuaResult<()> {
     let get_context = context.clone();
 
     // Create the __index function
-    let index_fn = lua.create_function(move |lua, (scene, key): (Table, String)| {
+    let index_fn = lua.create_function(move |lua, (_scene, key): (Table, String)| {
         if key.is_empty() || get_context.data_model.get(&key).is_none() {
             return Ok(Value::Nil);
         }
@@ -124,6 +145,33 @@ fn register_scene(lua: &Lua, context: &ScriptContext) -> LuaResult<()> {
     let metatable = lua.create_table()?;
     metatable.set("__index", index_fn)?;
     table.set_metatable(Some(metatable));
+
+    let get_fn_context = context.clone();
+    let get_fn = lua.create_function(move |lua, args: MultiValue| {
+        let key = args
+            .iter()
+            .find_map(|value| match value {
+                Value::String(s) => Some(s.to_str().map(|s| s.to_string())),
+                _ => None,
+            })
+            .transpose()?;
+
+        let Some(key) = key else {
+            return Err(mlua::Error::FromLuaConversionError {
+                from: "value",
+                to: "string",
+                message: Some("expected object name".into()),
+            });
+        };
+
+        if key.is_empty() || get_fn_context.data_model.get(&key).is_none() {
+            return Ok(Value::Nil);
+        }
+        let object = PlaceObject::new(get_fn_context.data_model.clone(), key);
+        let userdata = lua.create_userdata(object)?;
+        Ok(Value::UserData(userdata))
+    })?;
+    table.set("get", get_fn)?;
 
     // Keep your existing `names` function
     let names_context = context.clone();
@@ -142,7 +190,8 @@ fn register_scene(lua: &Lua, context: &ScriptContext) -> LuaResult<()> {
     })?;
     table.set("names", names)?;
 
-    globals.set("scene", table)?;
+    globals.set("scene", table.clone())?;
+    globals.set("place", table)?;
     Ok(())
 }
 
@@ -211,28 +260,36 @@ impl UserData for PlaceObject {
         fields.add_field_method_get("name", |_, this| Ok(this.name.clone()));
         fields.add_field_method_get("position", |lua, this| {
             if let Some(object) = this.data_model.get(&this.name) {
-                LuaVec3(object.position).into_lua(lua)
+                Ok(Value::UserData(
+                    lua.create_userdata(LuaVector3::new(object.position))?,
+                ))
             } else {
                 Ok(Value::Nil)
             }
         });
         fields.add_field_method_get("rotation", |lua, this| {
             if let Some(object) = this.data_model.get(&this.name) {
-                LuaVec3(object.rotation).into_lua(lua)
+                Ok(Value::UserData(
+                    lua.create_userdata(LuaVector3::new(object.rotation))?,
+                ))
             } else {
                 Ok(Value::Nil)
             }
         });
         fields.add_field_method_get("scale", |lua, this| {
             if let Some(object) = this.data_model.get(&this.name) {
-                LuaVec3(object.scale).into_lua(lua)
+                Ok(Value::UserData(
+                    lua.create_userdata(LuaVector3::new(object.scale))?,
+                ))
             } else {
                 Ok(Value::Nil)
             }
         });
         fields.add_field_method_get("color", |lua, this| {
             if let Some(object) = this.data_model.get(&this.name) {
-                LuaVec3(object.color).into_lua(lua)
+                Ok(Value::UserData(lua.create_userdata(
+                    LuaColor3::from_normalized(object.color),
+                )?))
             } else {
                 Ok(Value::Nil)
             }
@@ -247,20 +304,20 @@ impl UserData for PlaceObject {
                 .map(|object| object.intensity))
         });
 
-        fields.add_field_method_set("position", |_, this, value: LuaVec3| {
-            this.data_model.set_position(&this.name, value.0);
+        fields.add_field_method_set("position", |_, this, value: LuaVector3| {
+            this.data_model.set_position(&this.name, value.as_vec3());
             Ok(())
         });
-        fields.add_field_method_set("rotation", |_, this, value: LuaVec3| {
-            this.data_model.set_rotation(&this.name, value.0);
+        fields.add_field_method_set("rotation", |_, this, value: LuaVector3| {
+            this.data_model.set_rotation(&this.name, value.as_vec3());
             Ok(())
         });
-        fields.add_field_method_set("scale", |_, this, value: LuaVec3| {
-            this.data_model.set_scale(&this.name, value.0);
+        fields.add_field_method_set("scale", |_, this, value: LuaVector3| {
+            this.data_model.set_scale(&this.name, value.as_vec3());
             Ok(())
         });
-        fields.add_field_method_set("color", |_, this, value: LuaVec3| {
-            this.data_model.set_color(&this.name, value.0);
+        fields.add_field_method_set("color", |_, this, value: LuaColor3| {
+            this.data_model.set_color(&this.name, value.as_vec3());
             Ok(())
         });
         fields.add_field_method_set("fov", |_, this, value: f32| {
@@ -273,51 +330,98 @@ impl UserData for PlaceObject {
         });
     }
 
-    fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
-        methods.add_method("set_position", |_, this, value: LuaVec3| {
-            Ok(this.data_model.set_position(&this.name, value.0))
-        });
-        methods.add_method("set_rotation", |_, this, value: LuaVec3| {
-            Ok(this.data_model.set_rotation(&this.name, value.0))
-        });
-        methods.add_method("set_scale", |_, this, value: LuaVec3| {
-            Ok(this.data_model.set_scale(&this.name, value.0))
-        });
-        methods.add_method("set_color", |_, this, value: LuaVec3| {
-            Ok(this.data_model.set_color(&this.name, value.0))
-        });
-        methods.add_method("set_fov", |_, this, value: f32| {
-            Ok(this.data_model.set_fov(&this.name, value))
-        });
-        methods.add_method("set_intensity", |_, this, value: f32| {
-            Ok(this.data_model.set_intensity(&this.name, value))
-        });
-    }
+    fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(_methods: &mut M) {}
 }
 
 #[derive(Debug, Clone, Copy)]
-struct LuaVec3(Vec3);
+struct LuaVector3(Vec3);
 
-impl<'lua> FromLua<'lua> for LuaVec3 {
+impl LuaVector3 {
+    fn new(inner: Vec3) -> Self {
+        Self(inner)
+    }
+
+    fn as_vec3(self) -> Vec3 {
+        self.0
+    }
+}
+
+impl UserData for LuaVector3 {
+    fn add_fields<'lua, F: UserDataFields<'lua, Self>>(fields: &mut F) {
+        fields.add_field_method_get("X", |_, this| Ok(this.0.x));
+        fields.add_field_method_get("Y", |_, this| Ok(this.0.y));
+        fields.add_field_method_get("Z", |_, this| Ok(this.0.z));
+        fields.add_field_method_get("x", |_, this| Ok(this.0.x));
+        fields.add_field_method_get("y", |_, this| Ok(this.0.y));
+        fields.add_field_method_get("z", |_, this| Ok(this.0.z));
+    }
+}
+
+impl<'lua> FromLua<'lua> for LuaVector3 {
     fn from_lua(value: Value<'lua>, _: &'lua Lua) -> LuaResult<Self> {
         match value {
             Value::Table(table) => Ok(Self(table_to_vec3(&table)?)),
+            Value::UserData(ud) => ud.borrow::<LuaVector3>().map(|vec| *vec),
             _ => Err(mlua::Error::FromLuaConversionError {
                 from: value.type_name(),
                 to: "Vector3",
-                message: Some("expected table".into()),
+                message: Some("expected Vector3 userdata or table".into()),
             }),
         }
     }
 }
 
-impl<'lua> IntoLua<'lua> for LuaVec3 {
-    fn into_lua(self, lua: &'lua Lua) -> LuaResult<Value<'lua>> {
-        let table = lua.create_table()?;
-        table.set("x", self.0.x)?;
-        table.set("y", self.0.y)?;
-        table.set("z", self.0.z)?;
-        Ok(Value::Table(table))
+#[derive(Debug, Clone, Copy)]
+struct LuaColor3(Vec3);
+
+impl LuaColor3 {
+    fn from_rgb(r: f32, g: f32, b: f32) -> Self {
+        Self(Vec3::new(r, g, b) / 255.0)
+    }
+
+    fn from_normalized(color: Vec3) -> Self {
+        Self(color)
+    }
+
+    fn as_vec3(self) -> Vec3 {
+        self.0
+    }
+}
+
+impl UserData for LuaColor3 {
+    fn add_fields<'lua, F: UserDataFields<'lua, Self>>(fields: &mut F) {
+        fields.add_field_method_get("R", |_, this| Ok(this.0.x * 255.0));
+        fields.add_field_method_get("G", |_, this| Ok(this.0.y * 255.0));
+        fields.add_field_method_get("B", |_, this| Ok(this.0.z * 255.0));
+        fields.add_field_method_get("r", |_, this| Ok(this.0.x * 255.0));
+        fields.add_field_method_get("g", |_, this| Ok(this.0.y * 255.0));
+        fields.add_field_method_get("b", |_, this| Ok(this.0.z * 255.0));
+    }
+}
+
+impl<'lua> FromLua<'lua> for LuaColor3 {
+    fn from_lua(value: Value<'lua>, _: &'lua Lua) -> LuaResult<Self> {
+        match value {
+            Value::Table(table) => Ok(Self(table_to_vec3(&table)?)),
+            Value::UserData(ud) => {
+                if let Ok(color) = ud.borrow::<LuaColor3>() {
+                    Ok(*color)
+                } else if let Ok(vec) = ud.borrow::<LuaVector3>() {
+                    Ok(Self(vec.as_vec3()))
+                } else {
+                    Err(mlua::Error::FromLuaConversionError {
+                        from: "userdata",
+                        to: "Color3",
+                        message: Some("unexpected userdata".into()),
+                    })
+                }
+            }
+            _ => Err(mlua::Error::FromLuaConversionError {
+                from: value.type_name(),
+                to: "Color3",
+                message: Some("expected Color3 userdata or table".into()),
+            }),
+        }
     }
 }
 
@@ -399,24 +503,24 @@ mod tests {
                 r#"
                 local cube = place.get("Cube")
                 assert(cube ~= nil, "cube should exist")
-                cube.position = {x = 1.0, y = 2.0, z = 3.0}
-                cube:set_color({x = 0.5, y = 0.25, z = 0.0})
+                cube.position = Vector3.new(1.0, 2.0, 3.0)
+                cube.color = Color3.new(128, 64, 0)
                 local names = place.names()
                 local color = cube.color
                 local position = cube.position
-                return position.x, color.y, #names
+                return position.X, color.G, #names
             "#,
             )
             .eval()
             .unwrap();
 
         assert!((pos_x - 1.0).abs() < f32::EPSILON);
-        assert!((color_y - 0.25).abs() < f32::EPSILON);
+        assert!((color_y - 64.0).abs() < f32::EPSILON);
         assert_eq!(names_len, 1);
 
         let updated = model.get("Cube").unwrap();
         assert_eq!(updated.position, Vec3::new(1.0, 2.0, 3.0));
-        assert_eq!(updated.color, Vec3::new(0.5, 0.25, 0.0));
+        assert_eq!(updated.color, Vec3::new(128.0 / 255.0, 64.0 / 255.0, 0.0));
     }
 
     #[test]

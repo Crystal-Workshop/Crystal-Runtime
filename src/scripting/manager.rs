@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn script_updates_data_model() {
         let (_tmp, archive) =
-            build_archive("local cube = place.get('Cube') cube:set_color({x=1,y=0,z=0})");
+            build_archive("local cube = place.get('Cube') cube.color = Color3.new(255,0,0)");
         let scene = Scene {
             objects: vec![SceneObject {
                 name: "Cube".into(),
