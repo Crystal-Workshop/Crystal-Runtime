@@ -14,6 +14,9 @@ pub mod render;
 pub mod scene;
 pub mod scripting;
 
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
+
 pub use archive::{ArchiveFileEntry, CGameArchive};
 pub use data_model::DataModel;
 pub use input::{InputState, KeyCode, MouseButton, NamedKey};

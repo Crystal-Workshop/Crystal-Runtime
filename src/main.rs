@@ -22,6 +22,7 @@ use crystal_runtime::{
     NamedKey, Renderer, Scene, SceneObject, StaticViewport, ViewportProvider,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     env_logger::init();
     if let Err(err) = run() {
@@ -29,6 +30,9 @@ fn main() {
         std::process::exit(1);
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+fn main() {}
 
 fn run() -> Result<()> {
     let options = CliOptions::parse()?;

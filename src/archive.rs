@@ -2,6 +2,7 @@ use std::convert::TryFrom;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 
@@ -20,6 +21,7 @@ pub struct CGameArchive {
     version: u32,
     files: Vec<ArchiveFileEntry>,
     scene_xml: String,
+    data: Option<Arc<Vec<u8>>>,
 }
 
 impl CGameArchive {
@@ -50,14 +52,38 @@ impl CGameArchive {
         let version_bytes: [u8; 4] = data[4..8].try_into().expect("slice length verified above");
         let toc_bytes: [u8; 8] = data[8..16].try_into().expect("slice length verified above");
 
-        let (_endian, version, _toc_offset, files, scene_xml) =
-            parse_archive_bytes(&data, version_bytes, toc_bytes)?;
+        let (version, files, scene_xml) = parse_archive_metadata(&data, version_bytes, toc_bytes)?;
 
         Ok(Self {
             path: path_buf,
             version,
             files,
             scene_xml,
+            data: None,
+        })
+    }
+
+    /// Builds an archive from an in-memory buffer. Primarily used for WebAssembly builds.
+    pub fn from_bytes<S: AsRef<str>>(name: S, bytes: Vec<u8>) -> Result<Self> {
+        if bytes.len() < 16 {
+            return Err(anyhow!(
+                "archive too small to contain header (len={})",
+                bytes.len()
+            ));
+        }
+
+        let arc = Arc::new(bytes);
+        let data = arc.as_ref();
+        let version_bytes: [u8; 4] = data[4..8].try_into().expect("slice length verified above");
+        let toc_bytes: [u8; 8] = data[8..16].try_into().expect("slice length verified above");
+        let (version, files, scene_xml) = parse_archive_metadata(data, version_bytes, toc_bytes)?;
+
+        Ok(Self {
+            path: PathBuf::from(name.as_ref()),
+            version,
+            files,
+            scene_xml,
+            data: Some(arc),
         })
     }
 
@@ -91,6 +117,16 @@ impl CGameArchive {
 
     /// Extracts the raw bytes for a previously looked-up entry.
     pub fn extract_entry(&self, entry: &ArchiveFileEntry) -> Result<Vec<u8>> {
+        if let Some(data) = &self.data {
+            let start = entry.offset as usize;
+            let end = start
+                .checked_add(entry.size as usize)
+                .ok_or_else(|| anyhow!("entry size overflow"))?;
+            if end > data.len() {
+                return Err(anyhow!("entry {} exceeds archive bounds", entry.name));
+            }
+            return Ok(data[start..end].to_vec());
+        }
         let mut file = File::open(&self.path)
             .with_context(|| format!("unable to reopen archive {}", self.path.display()))?;
         file.seek(SeekFrom::Start(entry.offset))
@@ -100,6 +136,16 @@ impl CGameArchive {
             .with_context(|| format!("unable to read {} from archive", entry.name))?;
         Ok(buffer)
     }
+}
+
+fn parse_archive_metadata(
+    data: &[u8],
+    version_bytes: [u8; 4],
+    toc_bytes: [u8; 8],
+) -> Result<(u32, Vec<ArchiveFileEntry>, String)> {
+    let (_endian, version, _toc_offset, files, scene_xml) =
+        parse_archive_bytes(data, version_bytes, toc_bytes)?;
+    Ok((version, files, scene_xml))
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]

@@ -3,12 +3,13 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{bytes_of, Pod, Zeroable};
-use glam::{Mat3, Mat4, Vec3};
+use glam::{Mat3, Mat4};
 use log::error;
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 use winit::window::{Window, WindowId};
 
+use super::common::{CameraParams, LightParams};
 use crate::{CGameArchive, ObjMesh, SceneObject};
 
 /// GPU renderer backed by wgpu that draws meshes from the data model.
@@ -82,7 +83,12 @@ impl Renderer {
                 .present_modes
                 .iter()
                 .copied()
-                .find(|mode| matches!(mode, wgpu::PresentMode::Mailbox | wgpu::PresentMode::Immediate))
+                .find(|mode| {
+                    matches!(
+                        mode,
+                        wgpu::PresentMode::Mailbox | wgpu::PresentMode::Immediate
+                    )
+                })
                 .unwrap_or(wgpu::PresentMode::Fifo),
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
@@ -291,75 +297,77 @@ impl Renderer {
         }
 
         // Begin the single render pass
-let mut bind_groups = Vec::new();
+        let mut bind_groups = Vec::new();
 
-for (mesh_name, obj_index) in draw_list.iter() {
-    let object = &objects[*obj_index];
-    let model = object_model_matrix(object);
-    let normal = Mat3::from_mat4(model).inverse().transpose();
-    let constants = ObjectConstants {
-        model: model.to_cols_array_2d(),
-        normal: mat3_to_3x4(normal),
-        color: object.color.extend(1.0).into(),
-    };
+        for (mesh_name, obj_index) in draw_list.iter() {
+            let object = &objects[*obj_index];
+            let model = object_model_matrix(object);
+            let normal = Mat3::from_mat4(model).inverse().transpose();
+            let constants = ObjectConstants {
+                model: model.to_cols_array_2d(),
+                normal: mat3_to_3x4(normal),
+                color: object.color.extend(1.0).into(),
+            };
 
-    let object_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("object-uniform"),
-        contents: bytemuck::bytes_of(&constants),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    });
+            let object_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("object-uniform"),
+                    contents: bytemuck::bytes_of(&constants),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                });
 
-    let object_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        layout: &self.object_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: object_buffer.as_entire_binding(),
-        }],
-        label: Some("object-bind-group"),
-    });
+            let object_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &self.object_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: object_buffer.as_entire_binding(),
+                }],
+                label: Some("object-bind-group"),
+            });
 
-    bind_groups.push((mesh_name.clone(), object_bind_group));
-}
+            bind_groups.push((mesh_name.clone(), object_bind_group));
+        }
 
-let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-    label: Some("main-pass"),
-    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-        view: &view,
-        resolve_target: None,
-        ops: wgpu::Operations {
-            load: wgpu::LoadOp::Clear(wgpu::Color {
-                r: 0.03,
-                g: 0.03,
-                b: 0.05,
-                a: 1.0,
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("main-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.03,
+                        g: 0.03,
+                        b: 0.05,
+                        a: 1.0,
+                    }),
+                    store: true,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth.view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: true,
+                }),
+                stencil_ops: None,
             }),
-            store: true,
-        },
-    })],
-    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-        view: &self.depth.view,
-        depth_ops: Some(wgpu::Operations {
-            load: wgpu::LoadOp::Clear(1.0),
-            store: true,
-        }),
-        stencil_ops: None,
-    }),
-});
+        });
 
-pass.set_pipeline(&self.pipeline);
-pass.set_bind_group(0, &self.global_bind_group, &[]);
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.global_bind_group, &[]);
 
-for ((mesh_name, _obj_index), (_, bind_group)) in draw_list.iter().zip(bind_groups.iter()) {
-    let mesh = match mesh_name.as_ref() {
-        Some(name) => self.mesh_cache.get(name).unwrap_or(&self.default_mesh),
-        None => &self.default_mesh,
-    };
+        for ((mesh_name, _obj_index), (_, bind_group)) in draw_list.iter().zip(bind_groups.iter()) {
+            let mesh = match mesh_name.as_ref() {
+                Some(name) => self.mesh_cache.get(name).unwrap_or(&self.default_mesh),
+                None => &self.default_mesh,
+            };
 
-    pass.set_vertex_buffer(0, mesh.vertex.slice(..));
-    pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
-    pass.set_bind_group(1, bind_group, &[]);
-    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-}
+            pass.set_vertex_buffer(0, mesh.vertex.slice(..));
+            pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_bind_group(1, bind_group, &[]);
+            pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+        }
 
         drop(pass); // explicit to satisfy lifetimes on some backends
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -419,19 +427,6 @@ fn object_wants_mesh(object: &SceneObject) -> bool {
     } else {
         matches!(object.object_type.as_str(), "mesh" | "part")
     }
-}
-
-/// Camera parameters consumed by the renderer's uniform buffer.
-pub struct CameraParams {
-    pub view_proj: Mat4,
-    pub position: Vec3,
-}
-
-/// Lighting state consumed by the renderer's uniform buffer.
-pub struct LightParams {
-    pub position: Vec3,
-    pub color: Vec3,
-    pub intensity: f32,
 }
 
 struct MeshBuffers {
@@ -571,44 +566,24 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
 const DEFAULT_CUBE_VERTICES: &[f32] = &[
     // positions        // normals
-    -0.5, -0.5, 0.5, 0.0, 0.0, 1.0,
-     0.5, -0.5, 0.5, 0.0, 0.0, 1.0,
-     0.5,  0.5, 0.5, 0.0, 0.0, 1.0,
-    -0.5,  0.5, 0.5, 0.0, 0.0, 1.0,
-
-    -0.5, -0.5, -0.5, 0.0, 0.0, -1.0,
-     0.5, -0.5, -0.5, 0.0, 0.0, -1.0,
-     0.5,  0.5, -0.5, 0.0, 0.0, -1.0,
-    -0.5,  0.5, -0.5, 0.0, 0.0, -1.0,
-
-    -0.5, -0.5, -0.5, -1.0, 0.0, 0.0,
-    -0.5, -0.5,  0.5, -1.0, 0.0, 0.0,
-    -0.5,  0.5,  0.5, -1.0, 0.0, 0.0,
-    -0.5,  0.5, -0.5, -1.0, 0.0, 0.0,
-
-     0.5, -0.5, -0.5, 1.0, 0.0, 0.0,
-     0.5, -0.5,  0.5, 1.0, 0.0, 0.0,
-     0.5,  0.5,  0.5, 1.0, 0.0, 0.0,
-     0.5,  0.5, -0.5, 1.0, 0.0, 0.0,
-
-    -0.5, -0.5, -0.5, 0.0, -1.0, 0.0,
-     0.5, -0.5, -0.5, 0.0, -1.0, 0.0,
-     0.5, -0.5,  0.5, 0.0, -1.0, 0.0,
-    -0.5, -0.5,  0.5, 0.0, -1.0, 0.0,
-
-    -0.5, 0.5, -0.5, 0.0, 1.0, 0.0,
-     0.5, 0.5, -0.5, 0.0, 1.0, 0.0,
-     0.5, 0.5,  0.5, 0.0, 1.0, 0.0,
-    -0.5, 0.5,  0.5, 0.0, 1.0, 0.0,
+    -0.5, -0.5, 0.5, 0.0, 0.0, 1.0, 0.5, -0.5, 0.5, 0.0, 0.0, 1.0, 0.5, 0.5, 0.5, 0.0, 0.0, 1.0,
+    -0.5, 0.5, 0.5, 0.0, 0.0, 1.0, -0.5, -0.5, -0.5, 0.0, 0.0, -1.0, 0.5, -0.5, -0.5, 0.0, 0.0,
+    -1.0, 0.5, 0.5, -0.5, 0.0, 0.0, -1.0, -0.5, 0.5, -0.5, 0.0, 0.0, -1.0, -0.5, -0.5, -0.5, -1.0,
+    0.0, 0.0, -0.5, -0.5, 0.5, -1.0, 0.0, 0.0, -0.5, 0.5, 0.5, -1.0, 0.0, 0.0, -0.5, 0.5, -0.5,
+    -1.0, 0.0, 0.0, 0.5, -0.5, -0.5, 1.0, 0.0, 0.0, 0.5, -0.5, 0.5, 1.0, 0.0, 0.0, 0.5, 0.5, 0.5,
+    1.0, 0.0, 0.0, 0.5, 0.5, -0.5, 1.0, 0.0, 0.0, -0.5, -0.5, -0.5, 0.0, -1.0, 0.0, 0.5, -0.5,
+    -0.5, 0.0, -1.0, 0.0, 0.5, -0.5, 0.5, 0.0, -1.0, 0.0, -0.5, -0.5, 0.5, 0.0, -1.0, 0.0, -0.5,
+    0.5, -0.5, 0.0, 1.0, 0.0, 0.5, 0.5, -0.5, 0.0, 1.0, 0.0, 0.5, 0.5, 0.5, 0.0, 1.0, 0.0, -0.5,
+    0.5, 0.5, 0.0, 1.0, 0.0,
 ];
 
 const DEFAULT_CUBE_INDICES: &[u32] = &[
-     0,  1,  2,   0,  2,  3, // front
-     4,  6,  5,   4,  7,  6, // back
-     8,  9, 10,   8, 10, 11, // left
-    12, 14, 13,  12, 15, 14, // right
-    16, 18, 17,  16, 19, 18, // bottom
-    20, 21, 22,  20, 22, 23, // top
+    0, 1, 2, 0, 2, 3, // front
+    4, 6, 5, 4, 7, 6, // back
+    8, 9, 10, 8, 10, 11, // left
+    12, 14, 13, 12, 15, 14, // right
+    16, 18, 17, 16, 19, 18, // bottom
+    20, 21, 22, 20, 22, 23, // top
 ];
 
 #[cfg(test)]
