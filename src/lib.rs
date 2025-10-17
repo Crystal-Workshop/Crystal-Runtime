@@ -6,6 +6,7 @@
 //! outside of the crate so that the code remains testable and easy to
 //! embed in headless tools.
 
+pub mod app;
 pub mod archive;
 pub mod data_model;
 pub mod input;
@@ -13,6 +14,8 @@ pub mod obj;
 pub mod render;
 pub mod scene;
 pub mod scripting;
+#[cfg(target_arch = "wasm32")]
+pub mod web;
 
 pub use archive::{ArchiveFileEntry, CGameArchive};
 pub use data_model::DataModel;

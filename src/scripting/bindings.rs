@@ -11,7 +11,7 @@ use mlua::{
 use crate::data_model::DataModel;
 use crate::input::InputState;
 
-use super::manager::ViewportProvider;
+use super::native::ViewportProvider;
 
 pub(super) struct ScriptContext {
     pub data_model: DataModel,
@@ -474,7 +474,7 @@ fn table_component(table: &Table, key: &str, index: i32) -> LuaResult<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::manager::{StaticViewport, ViewportProvider};
+    use super::super::native::{StaticViewport, ViewportProvider};
     use super::*;
     use crate::data_model::DataModel;
     use crate::input::{InputState, KeyCode, MouseButton, NamedKey};
