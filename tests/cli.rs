@@ -15,7 +15,7 @@ fn build_archive() -> NamedTempFile {
     let script = r#"
 local cube = place.get("Cube")
 if cube ~= nil then
-  cube:set_color({x = 1, y = 0, z = 0})
+  cube.color = Color3.new(255, 0, 0)
 end
 "#;
 
