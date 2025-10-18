@@ -1,3 +1,4 @@
+#[cfg(not(target_arch = "wasm32"))]
 mod bindings;
 mod common;
 #[cfg(not(target_arch = "wasm32"))]
