@@ -82,12 +82,9 @@ pub async fn run(
         );
         let count = manager
             .start()
+            .await
             .map_err(|err| JsValue::from_str(&format!("failed to launch scripts: {err}")))?;
-        if count > 0 {
-            log_to_console(&format!(
-                "Lua scripts unavailable in wasm build (skipped {count})."
-            ));
-        }
+        log_to_console(&format!("Executed {count} Luau script(s)"));
         Some(manager)
     } else {
         None
