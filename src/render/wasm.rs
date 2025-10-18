@@ -34,9 +34,8 @@ impl Renderer {
     /// Initializes the GPU renderer for the provided window and archive.
     pub async fn new(window: Arc<Window>, archive: Arc<CGameArchive>) -> Result<Self> {
         let size = window.inner_size();
-        if size.width == 0 || size.height == 0 {
-            return Err(anyhow!("window has zero area"));
-        }
+        let width = size.width.max(1);
+        let height = size.height.max(1);
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::BROWSER_WEBGPU,
