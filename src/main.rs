@@ -4,11 +4,15 @@ fn main() {}
 #[cfg(not(target_arch = "wasm32"))]
 use std::any::Any;
 #[cfg(not(target_arch = "wasm32"))]
+use std::cell::RefCell;
+#[cfg(not(target_arch = "wasm32"))]
 use std::env;
 #[cfg(not(target_arch = "wasm32"))]
 use std::fmt;
 #[cfg(not(target_arch = "wasm32"))]
 use std::panic::{self, AssertUnwindSafe};
+#[cfg(not(target_arch = "wasm32"))]
+use std::rc::Rc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
@@ -25,15 +29,11 @@ use pollster::block_on;
 #[cfg(not(target_arch = "wasm32"))]
 use winit::dpi::LogicalSize;
 #[cfg(not(target_arch = "wasm32"))]
-use winit::event::{
-    ElementState, Event, KeyboardInput, MouseButton as WinitMouseButton, WindowEvent,
-};
+use winit::event::{ElementState, Event, KeyEvent, MouseButton as WinitMouseButton, WindowEvent};
 #[cfg(not(target_arch = "wasm32"))]
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 #[cfg(not(target_arch = "wasm32"))]
-use winit::platform::run_return::EventLoopExtRunReturn;
-#[cfg(not(target_arch = "wasm32"))]
-use winit::window::WindowBuilder;
+use winit::window::Window;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crystal_runtime::{
@@ -138,13 +138,23 @@ fn run_interactive(
     panic::set_hook(Box::new(|_| {}));
     let event_loop = panic::catch_unwind(AssertUnwindSafe(EventLoop::new));
     panic::set_hook(default_hook);
-    let event_loop =
-        event_loop.map_err(|panic| WindowInitError::from_panic("event loop", panic))?;
+    let event_loop = match event_loop {
+        Ok(Ok(loop_)) => loop_,
+        Ok(Err(err)) => {
+            return Err(WindowInitError::from_error("event loop", err).into());
+        }
+        Err(panic) => {
+            return Err(WindowInitError::from_panic("event loop", panic).into());
+        }
+    };
+    #[allow(deprecated)]
     let window = Arc::new(
-        WindowBuilder::new()
-            .with_title("Crystal Runtime")
-            .with_inner_size(LogicalSize::new(1280.0, 720.0))
-            .build(&event_loop)
+        event_loop
+            .create_window(
+                Window::default_attributes()
+                    .with_title("Crystal Runtime")
+                    .with_inner_size(LogicalSize::new(1280.0, 720.0)),
+            )
             .map_err(|err| WindowInitError::from_error("window", err))?,
     );
 
@@ -170,27 +180,32 @@ fn run_interactive(
         None
     };
 
-    let mut app = AppState {
+    let app = Rc::new(RefCell::new(AppState {
         renderer,
         data_model: model,
         input,
         viewport,
         script_manager,
         last_error: None,
-    };
+    }));
 
-    let mut event_loop = event_loop;
-    event_loop.run_return(|event, _, control_flow| {
-        *control_flow = ControlFlow::Poll;
-        if let Err(err) = app.process_event(&event, control_flow) {
+    let app_runner = Rc::clone(&app);
+    #[allow(deprecated)]
+    let run_result = event_loop.run(move |event, elwt| {
+        elwt.set_control_flow(ControlFlow::Poll);
+        let mut app = app_runner.borrow_mut();
+        if let Err(err) = app.process_event(&event, elwt) {
             app.last_error = Some(err);
-            control_flow.set_exit();
+            elwt.exit();
         }
     });
+    run_result.map_err(|err| WindowInitError::from_error("event loop", err))?;
 
-    app.shutdown();
+    let mut app = Rc::try_unwrap(app)
+        .map_err(|_| anyhow!("failed to recover application state"))?
+        .into_inner();
 
-    if let Some(err) = app.last_error {
+    if let Some(err) = app.last_error.take() {
         return Err(err);
     }
 
@@ -251,24 +266,24 @@ fn panic_message(panic: Box<dyn Any + Send>) -> String {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl AppState {
-    fn process_event(&mut self, event: &Event<()>, control_flow: &mut ControlFlow) -> Result<()> {
+    fn process_event(&mut self, event: &Event<()>, elwt: &ActiveEventLoop) -> Result<()> {
         match event {
             Event::WindowEvent { event, window_id } if *window_id == self.renderer.window_id() => {
                 match event {
                     WindowEvent::CloseRequested => {
-                        control_flow.set_exit();
+                        elwt.exit();
                     }
                     WindowEvent::Resized(size) => {
                         self.renderer.resize(*size);
                         self.viewport.update(size.width, size.height);
                     }
-                    WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
-                        self.renderer.resize(**new_inner_size);
-                        self.viewport
-                            .update(new_inner_size.width, new_inner_size.height);
+                    WindowEvent::ScaleFactorChanged { .. } => {
+                        let size = self.renderer.window().inner_size();
+                        self.renderer.resize(size);
+                        self.viewport.update(size.width, size.height);
                     }
-                    WindowEvent::KeyboardInput { input, .. } => {
-                        self.handle_keyboard(input);
+                    WindowEvent::KeyboardInput { event, .. } => {
+                        self.handle_keyboard(event);
                     }
                     WindowEvent::MouseInput { state, button, .. } => {
                         self.handle_mouse_button(*state, *button);
@@ -277,32 +292,38 @@ impl AppState {
                         let pos = Vec2::new(position.x as f32, position.y as f32);
                         self.input.set_mouse_position(pos);
                     }
+                    WindowEvent::RedrawRequested => {
+                        let objects = self.data_model.all_objects();
+                        let aspect = self.renderer_aspect();
+                        let camera = camera_from_objects(&objects, aspect);
+                        let light = light_from_objects(&objects);
+                        self.renderer.update_globals(&camera, &light);
+                        if let Err(err) = self.renderer.render(&objects) {
+                            match err {
+                                wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
+                                    let size = self.renderer.window().inner_size();
+                                    self.renderer.resize(size);
+                                }
+                                wgpu::SurfaceError::OutOfMemory => {
+                                    return Err(anyhow!("GPU is out of memory"));
+                                }
+                                wgpu::SurfaceError::Timeout => {
+                                    info!("Surface timeout; retrying next frame");
+                                }
+                                wgpu::SurfaceError::Other => {
+                                    info!("Surface reported an unknown error; retrying next frame");
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
-            Event::RedrawRequested(window_id) if *window_id == self.renderer.window_id() => {
-                let objects = self.data_model.all_objects();
-                let aspect = self.renderer_aspect();
-                let camera = camera_from_objects(&objects, aspect);
-                let light = light_from_objects(&objects);
-                self.renderer.update_globals(&camera, &light);
-                if let Err(err) = self.renderer.render(&objects) {
-                    match err {
-                        wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
-                            let size = self.renderer.window().inner_size();
-                            self.renderer.resize(size);
-                        }
-                        wgpu::SurfaceError::OutOfMemory => {
-                            return Err(anyhow!("GPU is out of memory"));
-                        }
-                        wgpu::SurfaceError::Timeout => {
-                            info!("Surface timeout; retrying next frame");
-                        }
-                    }
-                }
-            }
-            Event::MainEventsCleared => {
+            Event::AboutToWait => {
                 self.renderer.window().request_redraw();
+            }
+            Event::LoopExiting => {
+                self.shutdown();
             }
             _ => {}
         }
@@ -318,11 +339,14 @@ impl AppState {
         }
     }
 
-    fn handle_keyboard(&self, input: &KeyboardInput) {
-        let Some(keycode) = input.virtual_keycode.and_then(map_keycode) else {
+    fn handle_keyboard(&self, event: &KeyEvent) {
+        let Some(keycode) = map_keycode(&event.physical_key) else {
             return;
         };
-        match input.state {
+        if event.repeat {
+            return;
+        }
+        match event.state {
             ElementState::Pressed => self.input.set_key_down(keycode),
             ElementState::Released => self.input.set_key_up(keycode),
         }

@@ -14,7 +14,7 @@ use crate::{CGameArchive, ObjMesh, SceneObject};
 /// GPU renderer backed by wgpu that draws meshes from the data model.
 pub struct Renderer {
     window: Arc<Window>,
-    surface: wgpu::Surface,
+    surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -38,11 +38,13 @@ impl Renderer {
             return Err(anyhow!("window has zero area"));
         }
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::BROWSER_WEBGPU,
-            dx12_shader_compiler: Default::default(),
+            flags: wgpu::InstanceFlags::default(),
+            memory_budget_thresholds: Default::default(),
+            backend_options: Default::default(),
         });
-        let surface = unsafe { instance.create_surface(window.as_ref()) }?;
+        let surface = instance.create_surface(Arc::clone(&window))?;
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -54,15 +56,16 @@ impl Renderer {
             .context("failed to acquire GPU adapter")?;
 
         let limits = wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits());
+        let device_descriptor = wgpu::DeviceDescriptor {
+            label: Some("renderer-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: limits,
+            experimental_features: Default::default(),
+            memory_hints: Default::default(),
+            trace: Default::default(),
+        };
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    features: wgpu::Features::empty(),
-                    limits,
-                    label: Some("renderer-device"),
-                },
-                None,
-            )
+            .request_device(&device_descriptor)
             .await
             .context("failed to create GPU device")?;
 
@@ -80,6 +83,7 @@ impl Renderer {
             width: size.width,
             height: size.height,
             present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
         };
@@ -153,7 +157,8 @@ impl Renderer {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: (6 * std::mem::size_of::<f32>()) as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
@@ -188,7 +193,8 @@ impl Renderer {
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -196,6 +202,7 @@ impl Renderer {
                 })],
             }),
             multiview: None,
+            cache: None,
         });
 
         let default_mesh = MeshBuffers::from_mesh(
@@ -323,6 +330,7 @@ impl Renderer {
             label: Some("main-pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &view,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -331,17 +339,19 @@ impl Renderer {
                         b: 0.05,
                         a: 1.0,
                     }),
-                    store: true,
+                    store: wgpu::StoreOp::Store,
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.depth.view,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
-                    store: true,
+                    store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
             }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
         });
 
         pass.set_pipeline(&self.pipeline);

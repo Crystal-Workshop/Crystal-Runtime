@@ -7,12 +7,10 @@ use parking_lot::RwLock;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use winit::dpi::LogicalSize;
-use winit::event::{
-    ElementState, Event, KeyboardInput, MouseButton as WinitMouseButton, WindowEvent,
-};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::platform::web::{EventLoopExtWebSys, WindowBuilderExtWebSys};
-use winit::window::WindowBuilder;
+use winit::event::{ElementState, Event, KeyEvent, MouseButton as WinitMouseButton, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
+use winit::window::Window;
 
 use crate::app::{
     camera_from_objects, light_from_objects, map_keycode, map_mouse_button, print_final_state,
@@ -48,13 +46,17 @@ pub async fn run(
         .dyn_into()
         .map_err(|_| JsValue::from_str("element is not a canvas"))?;
 
-    let event_loop = EventLoop::new();
+    let event_loop = EventLoop::new()
+        .map_err(|err| JsValue::from_str(&format!("failed to create event loop: {err}")))?;
+    #[allow(deprecated)]
     let window = Arc::new(
-        WindowBuilder::new()
-            .with_canvas(Some(canvas))
-            .with_title("Crystal Runtime")
-            .with_inner_size(LogicalSize::new(1280.0, 720.0))
-            .build(&event_loop)
+        event_loop
+            .create_window(
+                Window::default_attributes()
+                    .with_canvas(Some(canvas))
+                    .with_title("Crystal Runtime")
+                    .with_inner_size(LogicalSize::new(1280.0, 720.0)),
+            )
             .map_err(|err| JsValue::from_str(&format!("window error: {err}")))?,
     );
 
@@ -101,11 +103,12 @@ pub async fn run(
         script_manager,
     };
 
-    event_loop.spawn(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Poll;
-        if let Err(err) = app.process_event(&event, control_flow) {
+    #[allow(deprecated)]
+    event_loop.spawn(move |event, elwt| {
+        elwt.set_control_flow(ControlFlow::Poll);
+        if let Err(err) = app.process_event(&event, elwt) {
             log_to_console(&format!("Error: {err}"));
-            control_flow.set_exit();
+            elwt.exit();
         }
     });
 
@@ -137,25 +140,21 @@ struct WebAppState {
 }
 
 impl WebAppState {
-    fn process_event(
-        &mut self,
-        event: &Event<()>,
-        control_flow: &mut ControlFlow,
-    ) -> Result<(), String> {
+    fn process_event(&mut self, event: &Event<()>, elwt: &ActiveEventLoop) -> Result<(), String> {
         match event {
             Event::WindowEvent { event, window_id } if *window_id == self.renderer.window_id() => {
                 match event {
-                    WindowEvent::CloseRequested => control_flow.set_exit(),
+                    WindowEvent::CloseRequested => elwt.exit(),
                     WindowEvent::Resized(size) => {
                         self.renderer.resize(*size);
                         self.viewport.update(size.width, size.height);
                     }
-                    WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
-                        self.renderer.resize(**new_inner_size);
-                        self.viewport
-                            .update(new_inner_size.width, new_inner_size.height);
+                    WindowEvent::ScaleFactorChanged { .. } => {
+                        let size = self.renderer.window().inner_size();
+                        self.renderer.resize(size);
+                        self.viewport.update(size.width, size.height);
                     }
-                    WindowEvent::KeyboardInput { input, .. } => self.handle_keyboard(input),
+                    WindowEvent::KeyboardInput { event, .. } => self.handle_keyboard(event),
                     WindowEvent::MouseInput { state, button, .. } => {
                         self.handle_mouse_button(*state, *button)
                     }
@@ -163,34 +162,39 @@ impl WebAppState {
                         let pos = Vec2::new(position.x as f32, position.y as f32);
                         self.input.set_mouse_position(pos);
                     }
+                    WindowEvent::RedrawRequested => {
+                        let objects = self.data_model.all_objects();
+                        let aspect = self.renderer_aspect();
+                        let camera = camera_from_objects(&objects, aspect);
+                        let light = light_from_objects(&objects);
+                        self.renderer.update_globals(&camera, &light);
+                        if let Err(err) = self.renderer.render(&objects) {
+                            match err {
+                                wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
+                                    let size = self.renderer.window().inner_size();
+                                    self.renderer.resize(size);
+                                }
+                                wgpu::SurfaceError::OutOfMemory => {
+                                    return Err("GPU is out of memory".to_string());
+                                }
+                                wgpu::SurfaceError::Timeout => {
+                                    log_to_console("Surface timeout; retrying next frame");
+                                }
+                                wgpu::SurfaceError::Other => {
+                                    log_to_console(
+                                        "Surface reported an unknown error; retrying next frame",
+                                    );
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
-            Event::RedrawRequested(window_id) if *window_id == self.renderer.window_id() => {
-                let objects = self.data_model.all_objects();
-                let aspect = self.renderer_aspect();
-                let camera = camera_from_objects(&objects, aspect);
-                let light = light_from_objects(&objects);
-                self.renderer.update_globals(&camera, &light);
-                if let Err(err) = self.renderer.render(&objects) {
-                    match err {
-                        wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
-                            let size = self.renderer.window().inner_size();
-                            self.renderer.resize(size);
-                        }
-                        wgpu::SurfaceError::OutOfMemory => {
-                            return Err("GPU is out of memory".to_string());
-                        }
-                        wgpu::SurfaceError::Timeout => {
-                            log_to_console("Surface timeout; retrying next frame");
-                        }
-                    }
-                }
-            }
-            Event::MainEventsCleared => {
+            Event::AboutToWait => {
                 self.renderer.window().request_redraw();
             }
-            Event::LoopDestroyed => {
+            Event::LoopExiting => {
                 self.shutdown();
             }
             _ => {}
@@ -207,11 +211,14 @@ impl WebAppState {
         }
     }
 
-    fn handle_keyboard(&self, input: &KeyboardInput) {
-        let Some(keycode) = input.virtual_keycode.and_then(map_keycode) else {
+    fn handle_keyboard(&self, event: &KeyEvent) {
+        let Some(keycode) = map_keycode(&event.physical_key) else {
             return;
         };
-        match input.state {
+        if event.repeat {
+            return;
+        }
+        match event.state {
             ElementState::Pressed => self.input.set_key_down(keycode),
             ElementState::Released => self.input.set_key_up(keycode),
         }
