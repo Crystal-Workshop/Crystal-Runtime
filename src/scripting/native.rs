@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use anyhow::{anyhow, Context, Result};
-use mlua::{HookTriggers, Lua};
+use mlua::{Lua, VmState};
 
 use crate::archive::{ArchiveFileEntry, CGameArchive};
 use crate::data_model::DataModel;
@@ -146,19 +146,13 @@ fn run_script_thread(
 ) -> Result<()> {
     let lua = Lua::new();
     let hook_running = Arc::clone(&running);
-    lua.set_hook(
-        HookTriggers {
-            every_nth_instruction: Some(1000),
-            ..Default::default()
-        },
-        move |_, _| {
-            if !hook_running.load(Ordering::Acquire) {
-                Err(mlua::Error::RuntimeError("script stopped by host".into()))
-            } else {
-                Ok(())
-            }
-        },
-    );
+    lua.set_interrupt(move |_| {
+        if !hook_running.load(Ordering::Acquire) {
+            Err(mlua::Error::RuntimeError("script stopped by host".into()))
+        } else {
+            Ok(VmState::Continue)
+        }
+    });
 
     let context = ScriptContext::new(data_model, input_state, viewport, running);
     register_globals(&lua, &context)?;
