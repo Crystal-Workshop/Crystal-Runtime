@@ -41,6 +41,8 @@ mlua = { version = "0.9", default-features = false, features = ["luau", "vendore
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = "0.1"
+futures = "0.3"
+gloo-timers = { version = "0.3", features = ["futures"] }
 js-sys = "0.3.77"
 wasm-bindgen = { version = "0.2.100", features = ["enable-interning"] }
 wasm-bindgen-futures = "0.4.50"

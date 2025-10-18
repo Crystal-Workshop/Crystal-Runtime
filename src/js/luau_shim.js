@@ -76,10 +76,18 @@ export async function executeLuau(source, chunkName) {
         throw new Error(`Luau returned status ${status}`);
     }
 
+    let resultPayload = null;
     for (const line of logs) {
-        if (typeof line === 'string' && line.startsWith('__CHANGES__:')) {
-            return line.substring('__CHANGES__:'.length);
+        if (typeof line === 'string' && line.startsWith('__HOST_RESULT__:')) {
+            resultPayload = line.substring('__HOST_RESULT__:'.length);
+        } else if (line && line.length > 0) {
+            console.log('[Luau]', line);
         }
     }
-    return '[]';
+
+    if (!resultPayload) {
+        resultPayload = '{"changes":[],"wait":0,"finished":true}';
+    }
+
+    return resultPayload;
 }

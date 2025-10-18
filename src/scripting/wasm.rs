@@ -1,13 +1,16 @@
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use futures::future::{AbortHandle, Abortable, Aborted};
+use futures::lock::Mutex as AsyncMutex;
 use glam::Vec3;
+use gloo_timers::future::TimeoutFuture;
 use serde::Deserialize;
 use serde_json::Value;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::JsFuture;
+use wasm_bindgen_futures::{spawn_local, JsFuture};
 
 use crate::archive::{ArchiveFileEntry, CGameArchive};
 use crate::data_model::DataModel;
@@ -28,6 +31,19 @@ struct ScriptChange {
     value: Value,
 }
 
+#[derive(Debug, Deserialize)]
+struct RawScriptResult {
+    changes: Vec<ScriptChange>,
+    wait: Option<f64>,
+    finished: Option<bool>,
+}
+
+struct ScriptResult {
+    changes: Vec<ScriptChange>,
+    wait: u32,
+    finished: bool,
+}
+
 /// Manages Lua scripts for the WebAssembly build.
 pub struct LuaScriptManager {
     archive: Arc<CGameArchive>,
@@ -35,7 +51,14 @@ pub struct LuaScriptManager {
     input_state: Arc<InputState>,
     viewport: Arc<dyn ViewportProvider + Send + Sync>,
     running: Arc<AtomicBool>,
+    active_tasks: Arc<AtomicUsize>,
+    execution_lock: Arc<AsyncMutex<()>>,
+    tasks: Vec<ScriptTask>,
     launched: usize,
+}
+
+struct ScriptTask {
+    abort_handle: AbortHandle,
 }
 
 impl LuaScriptManager {
@@ -51,6 +74,9 @@ impl LuaScriptManager {
             input_state,
             viewport,
             running: Arc::new(AtomicBool::new(false)),
+            active_tasks: Arc::new(AtomicUsize::new(0)),
+            execution_lock: Arc::new(AsyncMutex::new(())),
+            tasks: Vec::new(),
             launched: 0,
         }
     }
@@ -70,19 +96,102 @@ impl LuaScriptManager {
             return Ok(0);
         }
 
+        self.active_tasks.store(0, Ordering::Release);
         self.running.store(true, Ordering::Release);
         let mut launched = 0;
         for entry in entries {
-            if !self.running.load(Ordering::Acquire) {
-                break;
-            }
-            let script = self.build_script_payload(&entry)?;
-            self.execute_script(&script, &entry.name)
-                .await
-                .with_context(|| format!("failed to run {}", entry.name))?;
+            let script_body = self
+                .extract_script_source(&entry)
+                .with_context(|| format!("failed to extract {}", entry.name))?;
+
+            let running = Arc::clone(&self.running);
+            let active_tasks = Arc::clone(&self.active_tasks);
+            let data_model = self.data_model.clone();
+            let input_state = Arc::clone(&self.input_state);
+            let viewport = Arc::clone(&self.viewport);
+            let lock = Arc::clone(&self.execution_lock);
+            let chunk_name = entry.name.clone();
+
+            let (abort_handle, abort_registration) = AbortHandle::new_pair();
+            active_tasks.fetch_add(1, Ordering::AcqRel);
+            let task_future = {
+                let script_body = script_body;
+                async move {
+                    let mut finished = false;
+                    let mut last_error: Option<anyhow::Error> = None;
+                    while running.load(Ordering::Acquire) && !finished {
+                        let payload = match build_script_payload(
+                            &data_model,
+                            &input_state,
+                            viewport.as_ref(),
+                            &script_body,
+                            &chunk_name,
+                        ) {
+                            Ok(payload) => payload,
+                            Err(err) => {
+                                last_error = Some(err);
+                                break;
+                            }
+                        };
+
+                        let result = {
+                            let _guard = lock.lock().await;
+                            let outcome = execute_script(&payload, &chunk_name).await;
+                            drop(_guard);
+                            outcome
+                        };
+
+                        match result {
+                            Ok(script_result) => {
+                                for change in script_result.changes {
+                                    apply_change(&data_model, change)
+                                        .map_err(|err| anyhow!("{chunk_name}: {err}"))?;
+                                }
+
+                                finished = script_result.finished;
+
+                                if running.load(Ordering::Acquire) && !finished {
+                                    if script_result.wait > 0 {
+                                        TimeoutFuture::new(script_result.wait).await;
+                                    } else {
+                                        TimeoutFuture::new(0).await;
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                last_error = Some(err);
+                                break;
+                            }
+                        }
+                    }
+
+                    if let Some(err) = last_error {
+                        Err(err)
+                    } else {
+                        Ok(())
+                    }
+                }
+            };
+
+            let name = entry.name.clone();
+            let running_flag = Arc::clone(&self.running);
+            let active_counter = Arc::clone(&self.active_tasks);
+            spawn_local(async move {
+                let outcome = Abortable::new(task_future, abort_registration).await;
+                match outcome {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        log_script_error(&name, &err.to_string());
+                    }
+                    Err(Aborted) => {}
+                }
+                finish_task(&active_counter, &running_flag);
+            });
+
+            self.tasks.push(ScriptTask { abort_handle });
             launched += 1;
         }
-        self.running.store(false, Ordering::Release);
+
         self.launched = launched;
         Ok(launched)
     }
@@ -93,165 +202,191 @@ impl LuaScriptManager {
 
     pub fn stop(&mut self) -> Result<()> {
         self.running.store(false, Ordering::Release);
-        Ok(())
-    }
-
-    async fn execute_script(&self, payload: &str, chunk: &str) -> Result<()> {
-        let promise = js_execute_luau(payload, chunk).map_err(js_error)?;
-        let value = JsFuture::from(promise)
-            .await
-            .map_err(js_error)?
-            .as_string()
-            .ok_or_else(|| anyhow!("Luau runtime did not return a result"))?;
-        let changes: Vec<ScriptChange> = serde_json::from_str(&value)
-            .map_err(|err| anyhow!("failed to parse Luau changes: {err}"))?;
-        for change in changes {
-            self.apply_change(change)
-                .map_err(|err| anyhow!("failed to apply change: {err}"))?;
+        for task in self.tasks.drain(..) {
+            task.abort_handle.abort();
         }
         Ok(())
     }
+}
 
-    fn apply_change(&self, change: ScriptChange) -> Result<()> {
-        match change.field.as_str() {
-            "position" => {
-                let vec = parse_vec3(&change.value)?;
-                if !self.data_model.set_position(&change.object, vec) {
-                    return Err(anyhow!("unknown object {}", change.object));
-                }
+fn apply_change(data_model: &DataModel, change: ScriptChange) -> Result<()> {
+    match change.field.as_str() {
+        "position" => {
+            let vec = parse_vec3(&change.value)?;
+            if !data_model.set_position(&change.object, vec) {
+                return Err(anyhow!("unknown object {}", change.object));
             }
-            "rotation" => {
-                let vec = parse_vec3(&change.value)?;
-                if !self.data_model.set_rotation(&change.object, vec) {
-                    return Err(anyhow!("unknown object {}", change.object));
-                }
-            }
-            "scale" => {
-                let vec = parse_vec3(&change.value)?;
-                if !self.data_model.set_scale(&change.object, vec) {
-                    return Err(anyhow!("unknown object {}", change.object));
-                }
-            }
-            "color" => {
-                let vec = parse_vec3(&change.value)?;
-                if !self.data_model.set_color(&change.object, vec) {
-                    return Err(anyhow!("unknown object {}", change.object));
-                }
-            }
-            "fov" => {
-                let value = parse_f32(&change.value)?;
-                if !self.data_model.set_fov(&change.object, value) {
-                    return Err(anyhow!("unknown object {}", change.object));
-                }
-            }
-            "intensity" => {
-                let value = parse_f32(&change.value)?;
-                if !self.data_model.set_intensity(&change.object, value) {
-                    return Err(anyhow!("unknown object {}", change.object));
-                }
-            }
-            other => return Err(anyhow!("unsupported field {other}")),
         }
-        Ok(())
+        "rotation" => {
+            let vec = parse_vec3(&change.value)?;
+            if !data_model.set_rotation(&change.object, vec) {
+                return Err(anyhow!("unknown object {}", change.object));
+            }
+        }
+        "scale" => {
+            let vec = parse_vec3(&change.value)?;
+            if !data_model.set_scale(&change.object, vec) {
+                return Err(anyhow!("unknown object {}", change.object));
+            }
+        }
+        "color" => {
+            let vec = parse_vec3(&change.value)?;
+            if !data_model.set_color(&change.object, vec) {
+                return Err(anyhow!("unknown object {}", change.object));
+            }
+        }
+        "fov" => {
+            let value = parse_f32(&change.value)?;
+            if !data_model.set_fov(&change.object, value) {
+                return Err(anyhow!("unknown object {}", change.object));
+            }
+        }
+        "intensity" => {
+            let value = parse_f32(&change.value)?;
+            if !data_model.set_intensity(&change.object, value) {
+                return Err(anyhow!("unknown object {}", change.object));
+            }
+        }
+        other => return Err(anyhow!("unsupported field {other}")),
     }
+    Ok(())
+}
 
-    fn build_script_payload(&self, entry: &ArchiveFileEntry) -> Result<String> {
-        let source = self
-            .archive
-            .extract_entry(entry)
-            .with_context(|| format!("failed to extract {}", entry.name))?;
-        let script = String::from_utf8(source)
-            .map_err(|err| anyhow!("{} is not UTF-8: {err}", entry.name))?;
-        let mut payload = String::new();
-        self.emit_object_table(&mut payload)?;
-        self.emit_input_snapshot(&mut payload);
-        self.emit_viewport(&mut payload);
-        payload.push_str(LUAU_HELPERS);
-        payload.push_str("\n");
-        payload.push_str(&script);
-        payload.push_str("\n__host_emit_changes()\n");
-        Ok(payload)
-    }
+fn build_script_payload(
+    data_model: &DataModel,
+    input_state: &InputState,
+    viewport: &dyn ViewportProvider,
+    script: &str,
+    chunk: &str,
+) -> Result<String> {
+    let mut payload = String::new();
+    writeln!(&mut payload, "local __chunk_name = {}", luau_string(chunk))?;
+    emit_object_table(&mut payload, data_model)?;
+    emit_input_snapshot(&mut payload, input_state);
+    emit_viewport(&mut payload, viewport);
+    payload.push_str(LUAU_HELPERS);
+    payload.push_str("\nlocal function __host_script()\n");
+    payload.push_str(&indent_script(script));
+    payload.push_str("\nend\n__host_emit_result(__host_run_script(__chunk_name, __host_script, __objects, __object_order, __input, __viewport))\n");
+    Ok(payload)
+}
 
-    fn emit_object_table(&self, buffer: &mut String) -> Result<()> {
-        let objects = self.data_model.all_objects();
-        buffer.push_str("local __objects = {\n");
-        for object in &objects {
-            writeln!(buffer, "  [{}] = {{", luau_string(&object.name))?;
-            writeln!(buffer, "    name = {},", luau_string(&object.name))?;
-            writeln!(buffer, "    type = {},", luau_string(&object.object_type))?;
-            if let Some(mesh) = &object.mesh {
-                writeln!(buffer, "    mesh = {},", luau_string(mesh))?;
-            }
-            writeln!(
-                buffer,
-                "    position = {},",
-                luau_vec3_literal(object.position)
-            )?;
-            writeln!(
-                buffer,
-                "    rotation = {},",
-                luau_vec3_literal(object.rotation)
-            )?;
-            writeln!(buffer, "    scale = {},", luau_vec3_literal(object.scale))?;
-            writeln!(buffer, "    color = {},", luau_vec3_literal(object.color))?;
-            writeln!(buffer, "    fov = {},", luau_number(object.fov))?;
-            writeln!(buffer, "    intensity = {}", luau_number(object.intensity))?;
-            buffer.push_str("  },\n");
+fn emit_object_table(buffer: &mut String, data_model: &DataModel) -> Result<()> {
+    let objects = data_model.all_objects();
+    buffer.push_str("local __objects = {\n");
+    for object in &objects {
+        writeln!(buffer, "  [{}] = {{", luau_string(&object.name))?;
+        writeln!(buffer, "    name = {},", luau_string(&object.name))?;
+        writeln!(buffer, "    type = {},", luau_string(&object.object_type))?;
+        if let Some(mesh) = &object.mesh {
+            writeln!(buffer, "    mesh = {},", luau_string(mesh))?;
         }
-        buffer.push_str("}\n");
-
-        buffer.push_str("local __object_order = {\n");
-        for object in &objects {
-            writeln!(buffer, "  {},", luau_string(&object.name))?;
-        }
-        buffer.push_str("}\n");
-        Ok(())
-    }
-
-    fn emit_input_snapshot(&self, buffer: &mut String) {
-        let keys = collect_key_names(&self.input_state);
-        let buttons = collect_mouse_buttons(&self.input_state);
-        let mouse = self.input_state.mouse_position();
-        buffer.push_str("local __input = {\n");
-        buffer.push_str("  keys = {\n");
-        for name in keys {
-            buffer.push_str("    [");
-            buffer.push_str(&luau_string(&name));
-            buffer.push_str("] = true,\n");
-        }
-        buffer.push_str("  },\n");
-        buffer.push_str("  buttons = {\n");
-        for name in buttons {
-            buffer.push_str("    [");
-            buffer.push_str(&luau_string(&name));
-            buffer.push_str("] = true,\n");
-        }
-        buffer.push_str("  },\n");
         writeln!(
             buffer,
-            "  mouse = {{ x = {}, y = {} }},\n",
-            luau_number(mouse.x),
-            luau_number(mouse.y)
-        )
-        .unwrap();
-        buffer.push_str("}\n");
-    }
-
-    fn emit_viewport(&self, buffer: &mut String) {
-        let (width, height) = self.viewport.viewport_size();
+            "    position = {},",
+            luau_vec3_literal(object.position)
+        )?;
         writeln!(
             buffer,
-            "local __viewport = {{ width = {}, height = {} }}\n",
-            width, height
-        )
-        .unwrap();
+            "    rotation = {},",
+            luau_vec3_literal(object.rotation)
+        )?;
+        writeln!(buffer, "    scale = {},", luau_vec3_literal(object.scale))?;
+        writeln!(buffer, "    color = {},", luau_vec3_literal(object.color))?;
+        writeln!(buffer, "    fov = {},", luau_number(object.fov))?;
+        writeln!(buffer, "    intensity = {}", luau_number(object.intensity))?;
+        buffer.push_str("  },\n");
     }
+    buffer.push_str("}\n");
+
+    buffer.push_str("local __object_order = {\n");
+    for object in &objects {
+        writeln!(buffer, "  {},", luau_string(&object.name))?;
+    }
+    buffer.push_str("}\n");
+    Ok(())
+}
+
+fn emit_input_snapshot(buffer: &mut String, input_state: &InputState) {
+    let keys = collect_key_names(input_state);
+    let buttons = collect_mouse_buttons(input_state);
+    let mouse = input_state.mouse_position();
+    buffer.push_str("local __input = {\n");
+    buffer.push_str("  keys = {\n");
+    for name in keys {
+        buffer.push_str("    [");
+        buffer.push_str(&luau_string(&name));
+        buffer.push_str("] = true,\n");
+    }
+    buffer.push_str("  },\n");
+    buffer.push_str("  buttons = {\n");
+    for name in buttons {
+        buffer.push_str("    [");
+        buffer.push_str(&luau_string(&name));
+        buffer.push_str("] = true,\n");
+    }
+    buffer.push_str("  },\n");
+    writeln!(
+        buffer,
+        "  mouse = {{ x = {}, y = {} }},\n",
+        luau_number(mouse.x),
+        luau_number(mouse.y)
+    )
+    .unwrap();
+    buffer.push_str("}\n");
+}
+
+fn emit_viewport(buffer: &mut String, viewport: &dyn ViewportProvider) {
+    let (width, height) = viewport.viewport_size();
+    writeln!(
+        buffer,
+        "local __viewport = {{ width = {}, height = {} }}\n",
+        width, height
+    )
+    .unwrap();
+}
+
+fn indent_script(script: &str) -> String {
+    let mut indented = String::new();
+    if script.is_empty() {
+        return indented;
+    }
+    for line in script.lines() {
+        indented.push_str("    ");
+        indented.push_str(line);
+        indented.push('\n');
+    }
+    indented
+}
+
+async fn execute_script(payload: &str, chunk: &str) -> Result<ScriptResult> {
+    let promise = js_execute_luau(payload, chunk).map_err(js_error)?;
+    let value = JsFuture::from(promise)
+        .await
+        .map_err(js_error)?
+        .as_string()
+        .ok_or_else(|| anyhow!("Luau runtime did not return a result"))?;
+    let raw: RawScriptResult = serde_json::from_str(&value)
+        .map_err(|err| anyhow!("failed to parse Luau result: {err}"))?;
+    let wait = raw.wait.unwrap_or(0.0).max(0.0);
+    let wait = wait.min(u32::MAX as f64) as u32;
+    Ok(ScriptResult {
+        changes: raw.changes,
+        wait,
+        finished: raw.finished.unwrap_or(false),
+    })
 }
 
 impl Drop for LuaScriptManager {
     fn drop(&mut self) {
         let _ = self.stop();
+    }
+}
+
+impl LuaScriptManager {
+    fn extract_script_source(&self, entry: &ArchiveFileEntry) -> Result<String> {
+        let source = self.archive.extract_entry(entry)?;
+        String::from_utf8(source).map_err(|err| anyhow!("{} is not UTF-8: {err}", entry.name))
     }
 }
 
@@ -431,8 +566,43 @@ fn js_error(err: JsValue) -> anyhow::Error {
     }
 }
 
+fn log_script_error(chunk: &str, message: &str) {
+    let formatted = format!("Luau script {} failed: {}", chunk, message);
+    web_sys::console::error_1(&JsValue::from_str(&formatted));
+}
+
+fn finish_task(active: &Arc<AtomicUsize>, running: &Arc<AtomicBool>) {
+    if active.fetch_sub(1, Ordering::AcqRel) == 1 {
+        running.store(false, Ordering::Release);
+    }
+}
+
 const LUAU_HELPERS: &str = r#"
-local __changes = {}
+__host_runtime = __host_runtime or {}
+local __host_current_state = nil
+
+local function __host_get_state(chunk)
+    local state = __host_runtime[chunk]
+    if not state then
+        state = {
+            thread = nil,
+            objects = {},
+            object_order = {},
+            input = { keys = {}, buttons = {}, mouse = { x = 0, y = 0 } },
+            viewport = { width = 0, height = 0 },
+            changes = {},
+            object_cache = {},
+        }
+        __host_runtime[chunk] = state
+    end
+    state.changes = {}
+    state.object_cache = state.object_cache or {}
+    return state
+end
+
+local function __host_set_current(state)
+    __host_current_state = state
+end
 
 local function __copy_vec3(v)
     return { x = v.x, y = v.y, z = v.z }
@@ -443,31 +613,25 @@ local function __copy_color(v)
 end
 
 local function __record_change(name, field, value)
-    __changes[#__changes + 1] = { object = name, field = field, value = value }
+    local state = __host_current_state
+    if not state then
+        return
+    end
+    local changes = state.changes
+    changes[#changes + 1] = { object = name, field = field, value = value }
 end
 
-local function __vector3_table(v)
-    return { X = v.x, Y = v.y, Z = v.z, x = v.x, y = v.y, z = v.z }
-end
-
-local function __color3_table(v)
-    local r = v.x * 255
-    local g = v.y * 255
-    local b = v.z * 255
-    return { R = r, G = g, B = b, r = r, g = g, b = b }
-end
-
-Vector3 = {}
+Vector3 = Vector3 or {}
 function Vector3.new(x, y, z)
     return { X = x, Y = y, Z = z, x = x, y = y, z = z }
 end
 
-Vector2 = {}
+Vector2 = Vector2 or {}
 function Vector2.new(x, y)
     return { X = x, Y = y, x = x, y = y }
 end
 
-Color3 = {}
+Color3 = Color3 or {}
 function Color3.new(r, g, b)
     return { R = r, G = g, B = b, r = r, g = g, b = b }
 end
@@ -498,18 +662,21 @@ local function __to_color3(value)
     return { x = r / 255, y = g / 255, z = b / 255 }
 end
 
-local __object_cache = {}
 local function __wrap_object(name)
-    if __object_cache[name] then
-        return __object_cache[name]
-    end
-    local data = __objects[name]
-    if not data then
+    local state = __host_current_state
+    if not state then
         return nil
+    end
+    if state.object_cache[name] then
+        return state.object_cache[name]
     end
     local proxy = {}
     local meta = {}
     function meta.__index(_, key)
+        local data = state.objects[name]
+        if not data then
+            return nil
+        end
         if key == "name" then
             return data.name
         elseif key == "position" then
@@ -532,6 +699,10 @@ local function __wrap_object(name)
         return rawget(proxy, key)
     end
     function meta.__newindex(_, key, value)
+        local data = state.objects[name]
+        if not data then
+            return
+        end
         if key == "position" then
             local vec = __to_vec3(value)
             if vec then
@@ -566,24 +737,28 @@ local function __wrap_object(name)
             rawset(proxy, key, value)
         end
     end
-    __object_cache[name] = setmetatable(proxy, meta)
-    return __object_cache[name]
+    state.object_cache[name] = setmetatable(proxy, meta)
+    return state.object_cache[name]
 end
 
-scene = {}
-setmetatable(scene, {
-    __index = function(_, key)
-        return __wrap_object(key)
-    end
-})
+scene = scene or {}
+local scene_meta = getmetatable(scene) or {}
+function scene_meta.__index(_, key)
+    return __wrap_object(key)
+end
+setmetatable(scene, scene_meta)
 
 function scene.get(name)
     return __wrap_object(name)
 end
 
 function scene.names()
+    local state = __host_current_state
+    if not state then
+        return {}
+    end
     local result = {}
-    for index, name in ipairs(__object_order) do
+    for index, name in ipairs(state.object_order) do
         result[index] = name
     end
     return result
@@ -591,7 +766,8 @@ end
 
 place = scene
 
-service = { input = {} }
+service = service or {}
+service.input = service.input or {}
 
 local function __normalize_name(name)
     if type(name) ~= "string" then
@@ -605,20 +781,36 @@ function service.input:GetKeyDown(name)
     if not name then
         return false
     end
-    return __input.keys[name] or false
+    local state = __host_current_state
+    if not state then
+        return false
+    end
+    return state.input.keys[name] or false
 end
 
 function service.input:GetMousePosition()
-    return Vector2.new(__input.mouse.x, __input.mouse.y)
+    local state = __host_current_state
+    if not state then
+        return Vector2.new(0, 0)
+    end
+    return Vector2.new(state.input.mouse.x, state.input.mouse.y)
 end
 
-screen = {}
+screen = screen or {}
 function screen:GetViewportSize()
-    return Vector2.new(__viewport.width, __viewport.height)
+    local state = __host_current_state
+    if not state then
+        return Vector2.new(0, 0)
+    end
+    return Vector2.new(state.viewport.width, state.viewport.height)
 end
 
-function wait(_)
-    return
+function wait(duration)
+    duration = tonumber(duration) or 0
+    if duration < 0 then
+        duration = 0
+    end
+    return coroutine.yield(duration)
 end
 
 local function __escape(str)
@@ -654,13 +846,50 @@ local function __encode(value)
     return "null"
 end
 
-function __host_emit_changes()
-    local parts = {}
-    for i, change in ipairs(__changes) do
-        parts[i] = '{"object":' .. __encode(change.object)
-            .. ',"field":' .. __encode(change.field)
-            .. ',"value":' .. __encode(change.value) .. '}'
+local function __host_emit_result(result)
+    print("__HOST_RESULT__:" .. __encode(result))
+end
+
+local function __host_run_script(chunk, script_fn, objects, order, input, viewport)
+    local state = __host_get_state(chunk)
+    state.objects = objects
+    state.object_order = order
+    state.input = input
+    state.viewport = viewport
+    __host_set_current(state)
+
+    if not state.thread or coroutine.status(state.thread) == "dead" then
+        state.thread = coroutine.create(function()
+            local ok, err = pcall(script_fn)
+            if not ok then
+                error(err)
+            end
+        end)
     end
-    print("__CHANGES__:[" .. table.concat(parts, ",") .. "]")
+
+    local thread = state.thread
+    if not thread or coroutine.status(thread) == "dead" then
+        state.thread = nil
+        return { changes = state.changes, wait = 0, finished = true }
+    end
+
+    local ok, wait_time = coroutine.resume(thread, 0)
+    if not ok then
+        state.thread = nil
+        error(wait_time)
+    end
+
+    local finished = coroutine.status(thread) == "dead"
+    local wait_ms = 0
+    if finished then
+        state.thread = nil
+    else
+        wait_ms = tonumber(wait_time) or 0
+        if wait_ms < 0 then
+            wait_ms = 0
+        end
+    end
+
+    return { changes = state.changes, wait = wait_ms, finished = finished }
 end
 "#;

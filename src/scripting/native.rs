@@ -10,9 +10,9 @@ use crate::data_model::DataModel;
 use crate::input::InputState;
 
 use super::bindings::{register_globals, ScriptContext};
-use super::viewport::ViewportProvider;
 #[cfg(test)]
 use super::viewport::StaticViewport;
+use super::viewport::ViewportProvider;
 
 /// Manages the lifecycle of Lua scripts embedded in a `.cgame` archive.
 pub struct LuaScriptManager {
