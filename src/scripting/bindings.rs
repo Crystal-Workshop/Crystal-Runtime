@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use glam::{Vec2, Vec3};
@@ -11,7 +12,7 @@ use mlua::{
 use crate::data_model::DataModel;
 use crate::input::InputState;
 
-use super::native::ViewportProvider;
+use super::viewport::ViewportProvider;
 
 pub(super) struct ScriptContext {
     pub data_model: DataModel,
@@ -102,6 +103,7 @@ fn register_print(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn register_wait(lua: &Lua, running: Arc<AtomicBool>) -> LuaResult<()> {
     let wait_running = Arc::clone(&running);
     let wait = lua.create_function(move |_, millis: Option<u64>| {
@@ -118,6 +120,47 @@ fn register_wait(lua: &Lua, running: Arc<AtomicBool>) -> LuaResult<()> {
             let sleep = remaining.min(CHUNK);
             std::thread::sleep(Duration::from_millis(sleep));
             remaining -= sleep;
+        }
+        Ok(())
+    })?;
+    lua.globals().set("wait", wait)?;
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn register_wait(lua: &Lua, running: Arc<AtomicBool>) -> LuaResult<()> {
+    use js_sys::Date;
+
+    let wait_running = Arc::clone(&running);
+    let wait = lua.create_function(move |_, millis: Option<u64>| {
+        let duration = millis.unwrap_or(0);
+        if duration == 0 {
+            return Ok(());
+        }
+
+        if let Some(window) = web_sys::window() {
+            if let Ok(Some(perf)) = window.performance() {
+                let start = perf.now();
+                loop {
+                    if !wait_running.load(Ordering::Acquire) {
+                        return Err(mlua::Error::RuntimeError("wait interrupted".into()));
+                    }
+                    if perf.now() - start >= duration as f64 {
+                        break;
+                    }
+                }
+                return Ok(());
+            }
+        }
+
+        let start = Date::now();
+        loop {
+            if !wait_running.load(Ordering::Acquire) {
+                return Err(mlua::Error::RuntimeError("wait interrupted".into()));
+            }
+            if Date::now() - start >= duration as f64 {
+                break;
+            }
         }
         Ok(())
     })?;
@@ -474,7 +517,7 @@ fn table_component(table: &Table, key: &str, index: i32) -> LuaResult<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::native::{StaticViewport, ViewportProvider};
+    use super::super::viewport::{StaticViewport, ViewportProvider};
     use super::*;
     use crate::data_model::DataModel;
     use crate::input::{InputState, KeyCode, MouseButton, NamedKey};
