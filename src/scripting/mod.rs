@@ -1,4 +1,11 @@
+#[cfg(not(target_arch = "wasm32"))]
 mod bindings;
-mod manager;
+#[cfg(not(target_arch = "wasm32"))]
+mod native;
+#[cfg(target_arch = "wasm32")]
+mod wasm;
 
-pub use manager::{LuaScriptManager, StaticViewport, ViewportProvider};
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::{LuaScriptManager, StaticViewport, ViewportProvider};
+#[cfg(target_arch = "wasm32")]
+pub use wasm::{LuaScriptManager, StaticViewport, ViewportProvider};

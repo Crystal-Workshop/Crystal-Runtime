@@ -2,6 +2,7 @@ use std::convert::TryFrom;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 
@@ -16,10 +17,16 @@ pub struct ArchiveFileEntry {
 /// In-memory representation of a `.cgame` archive.
 #[derive(Debug, Clone)]
 pub struct CGameArchive {
-    path: PathBuf,
+    backing: ArchiveBacking,
     version: u32,
     files: Vec<ArchiveFileEntry>,
     scene_xml: String,
+}
+
+#[derive(Debug, Clone)]
+enum ArchiveBacking {
+    File(PathBuf),
+    Memory { _label: String, data: Arc<[u8]> },
 }
 
 impl CGameArchive {
@@ -32,29 +39,25 @@ impl CGameArchive {
         file.read_to_end(&mut data)
             .context("unable to read archive into memory")?;
 
-        if data.len() < 16 {
-            return Err(anyhow!(
-                "archive too small to contain header (len={})",
-                data.len()
-            ));
-        }
-
-        let magic = &data[..4];
-        if magic != b"CGME" {
-            return Err(anyhow!(
-                "invalid archive magic: expected CGME, found {:?}",
-                magic
-            ));
-        }
-
-        let version_bytes: [u8; 4] = data[4..8].try_into().expect("slice length verified above");
-        let toc_bytes: [u8; 8] = data[8..16].try_into().expect("slice length verified above");
-
-        let (_endian, version, _toc_offset, files, scene_xml) =
-            parse_archive_bytes(&data, version_bytes, toc_bytes)?;
+        let (version, files, scene_xml) = parse_archive_metadata(&data)?;
 
         Ok(Self {
-            path: path_buf,
+            backing: ArchiveBacking::File(path_buf),
+            version,
+            files,
+            scene_xml,
+        })
+    }
+
+    /// Creates an archive from bytes already resident in memory.
+    pub fn from_bytes(label: impl Into<String>, data: Vec<u8>) -> Result<Self> {
+        let storage: Arc<[u8]> = Arc::from(data.into_boxed_slice());
+        let (version, files, scene_xml) = parse_archive_metadata(&storage)?;
+        Ok(Self {
+            backing: ArchiveBacking::Memory {
+                _label: label.into(),
+                data: Arc::clone(&storage),
+            },
             version,
             files,
             scene_xml,
@@ -91,15 +94,56 @@ impl CGameArchive {
 
     /// Extracts the raw bytes for a previously looked-up entry.
     pub fn extract_entry(&self, entry: &ArchiveFileEntry) -> Result<Vec<u8>> {
-        let mut file = File::open(&self.path)
-            .with_context(|| format!("unable to reopen archive {}", self.path.display()))?;
-        file.seek(SeekFrom::Start(entry.offset))
-            .with_context(|| format!("unable to seek to {}", entry.name))?;
-        let mut buffer = vec![0u8; entry.size as usize];
-        file.read_exact(&mut buffer)
-            .with_context(|| format!("unable to read {} from archive", entry.name))?;
-        Ok(buffer)
+        match &self.backing {
+            ArchiveBacking::File(path) => {
+                let mut file = File::open(path)
+                    .with_context(|| format!("unable to reopen archive {}", path.display()))?;
+                file.seek(SeekFrom::Start(entry.offset))
+                    .with_context(|| format!("unable to seek to {}", entry.name))?;
+                let mut buffer = vec![0u8; entry.size as usize];
+                file.read_exact(&mut buffer)
+                    .with_context(|| format!("unable to read {} from archive", entry.name))?;
+                Ok(buffer)
+            }
+            ArchiveBacking::Memory { data, .. } => {
+                let start = entry.offset as usize;
+                let end = start + entry.size as usize;
+                if end > data.len() {
+                    return Err(anyhow!(
+                        "entry {} extends past archive bounds ({} > {})",
+                        entry.name,
+                        end,
+                        data.len()
+                    ));
+                }
+                Ok(data[start..end].to_vec())
+            }
+        }
     }
+}
+
+fn parse_archive_metadata(data: &[u8]) -> Result<(u32, Vec<ArchiveFileEntry>, String)> {
+    if data.len() < 16 {
+        return Err(anyhow!(
+            "archive too small to contain header (len={})",
+            data.len()
+        ));
+    }
+
+    let magic = &data[..4];
+    if magic != b"CGME" {
+        return Err(anyhow!(
+            "invalid archive magic: expected CGME, found {:?}",
+            magic
+        ));
+    }
+
+    let version_bytes: [u8; 4] = data[4..8].try_into().expect("slice length verified above");
+    let toc_bytes: [u8; 8] = data[8..16].try_into().expect("slice length verified above");
+
+    let (_endian, version, _toc_offset, files, scene_xml) =
+        parse_archive_bytes(data, version_bytes, toc_bytes)?;
+    Ok((version, files, scene_xml))
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]

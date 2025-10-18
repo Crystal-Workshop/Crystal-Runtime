@@ -1,27 +1,50 @@
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 use std::any::Any;
+#[cfg(not(target_arch = "wasm32"))]
+use std::cell::RefCell;
+#[cfg(not(target_arch = "wasm32"))]
 use std::env;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
 use std::panic::{self, AssertUnwindSafe};
+#[cfg(not(target_arch = "wasm32"))]
+use std::rc::Rc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
 use anyhow::{anyhow, Context, Result};
-use glam::{Mat4, Vec2, Vec3};
+#[cfg(not(target_arch = "wasm32"))]
+use glam::Vec2;
+#[cfg(not(target_arch = "wasm32"))]
 use log::info;
+#[cfg(not(target_arch = "wasm32"))]
 use parking_lot::RwLock;
+#[cfg(not(target_arch = "wasm32"))]
 use pollster::block_on;
+#[cfg(not(target_arch = "wasm32"))]
 use winit::dpi::LogicalSize;
-use winit::event::{
-    ElementState, Event, KeyboardInput, MouseButton as WinitMouseButton, WindowEvent,
-};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::platform::run_return::EventLoopExtRunReturn;
-use winit::window::WindowBuilder;
+#[cfg(not(target_arch = "wasm32"))]
+use winit::event::{ElementState, Event, KeyEvent, MouseButton as WinitMouseButton, WindowEvent};
+#[cfg(not(target_arch = "wasm32"))]
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+#[cfg(not(target_arch = "wasm32"))]
+use winit::window::Window;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crystal_runtime::{
-    CGameArchive, CameraParams, DataModel, InputState, KeyCode, LightParams, LuaScriptManager,
-    NamedKey, Renderer, Scene, SceneObject, StaticViewport, ViewportProvider,
+    app::{
+        camera_from_objects, light_from_objects, map_keycode, map_mouse_button, print_final_state,
+    },
+    CGameArchive, DataModel, InputState, LuaScriptManager, Renderer, Scene, StaticViewport,
+    ViewportProvider,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     env_logger::init();
     if let Err(err) = run() {
@@ -30,6 +53,7 @@ fn main() {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run() -> Result<()> {
     let options = CliOptions::parse()?;
     let archive = Arc::new(
@@ -77,6 +101,7 @@ fn run() -> Result<()> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run_headless(
     archive: Arc<CGameArchive>,
     model: DataModel,
@@ -102,6 +127,7 @@ fn run_headless(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run_interactive(
     archive: Arc<CGameArchive>,
     model: DataModel,
@@ -112,13 +138,23 @@ fn run_interactive(
     panic::set_hook(Box::new(|_| {}));
     let event_loop = panic::catch_unwind(AssertUnwindSafe(EventLoop::new));
     panic::set_hook(default_hook);
-    let event_loop =
-        event_loop.map_err(|panic| WindowInitError::from_panic("event loop", panic))?;
+    let event_loop = match event_loop {
+        Ok(Ok(loop_)) => loop_,
+        Ok(Err(err)) => {
+            return Err(WindowInitError::from_error("event loop", err).into());
+        }
+        Err(panic) => {
+            return Err(WindowInitError::from_panic("event loop", panic).into());
+        }
+    };
+    #[allow(deprecated)]
     let window = Arc::new(
-        WindowBuilder::new()
-            .with_title("Crystal Runtime")
-            .with_inner_size(LogicalSize::new(1280.0, 720.0))
-            .build(&event_loop)
+        event_loop
+            .create_window(
+                Window::default_attributes()
+                    .with_title("Crystal Runtime")
+                    .with_inner_size(LogicalSize::new(1280.0, 720.0)),
+            )
             .map_err(|err| WindowInitError::from_error("window", err))?,
     );
 
@@ -144,33 +180,39 @@ fn run_interactive(
         None
     };
 
-    let mut app = AppState {
+    let app = Rc::new(RefCell::new(AppState {
         renderer,
         data_model: model,
         input,
         viewport,
         script_manager,
         last_error: None,
-    };
+    }));
 
-    let mut event_loop = event_loop;
-    event_loop.run_return(|event, _, control_flow| {
-        *control_flow = ControlFlow::Poll;
-        if let Err(err) = app.process_event(&event, control_flow) {
+    let app_runner = Rc::clone(&app);
+    #[allow(deprecated)]
+    let run_result = event_loop.run(move |event, elwt| {
+        elwt.set_control_flow(ControlFlow::Poll);
+        let mut app = app_runner.borrow_mut();
+        if let Err(err) = app.process_event(&event, elwt) {
             app.last_error = Some(err);
-            control_flow.set_exit();
+            elwt.exit();
         }
     });
+    run_result.map_err(|err| WindowInitError::from_error("event loop", err))?;
 
-    app.shutdown();
+    let mut app = Rc::try_unwrap(app)
+        .map_err(|_| anyhow!("failed to recover application state"))?
+        .into_inner();
 
-    if let Some(err) = app.last_error {
+    if let Some(err) = app.last_error.take() {
         return Err(err);
     }
 
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct AppState {
     renderer: Renderer,
     data_model: DataModel,
@@ -180,11 +222,13 @@ struct AppState {
     last_error: Option<anyhow::Error>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 struct WindowInitError {
     message: String,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl WindowInitError {
     fn from_panic(stage: &str, panic: Box<dyn Any + Send>) -> Self {
         Self {
@@ -199,14 +243,17 @@ impl WindowInitError {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl fmt::Display for WindowInitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.message)
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl std::error::Error for WindowInitError {}
 
+#[cfg(not(target_arch = "wasm32"))]
 fn panic_message(panic: Box<dyn Any + Send>) -> String {
     match panic.downcast::<String>() {
         Ok(msg) => *msg,
@@ -217,25 +264,26 @@ fn panic_message(panic: Box<dyn Any + Send>) -> String {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl AppState {
-    fn process_event(&mut self, event: &Event<()>, control_flow: &mut ControlFlow) -> Result<()> {
+    fn process_event(&mut self, event: &Event<()>, elwt: &ActiveEventLoop) -> Result<()> {
         match event {
             Event::WindowEvent { event, window_id } if *window_id == self.renderer.window_id() => {
                 match event {
                     WindowEvent::CloseRequested => {
-                        control_flow.set_exit();
+                        elwt.exit();
                     }
                     WindowEvent::Resized(size) => {
                         self.renderer.resize(*size);
                         self.viewport.update(size.width, size.height);
                     }
-                    WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
-                        self.renderer.resize(**new_inner_size);
-                        self.viewport
-                            .update(new_inner_size.width, new_inner_size.height);
+                    WindowEvent::ScaleFactorChanged { .. } => {
+                        let size = self.renderer.window().inner_size();
+                        self.renderer.resize(size);
+                        self.viewport.update(size.width, size.height);
                     }
-                    WindowEvent::KeyboardInput { input, .. } => {
-                        self.handle_keyboard(input);
+                    WindowEvent::KeyboardInput { event, .. } => {
+                        self.handle_keyboard(event);
                     }
                     WindowEvent::MouseInput { state, button, .. } => {
                         self.handle_mouse_button(*state, *button);
@@ -244,32 +292,38 @@ impl AppState {
                         let pos = Vec2::new(position.x as f32, position.y as f32);
                         self.input.set_mouse_position(pos);
                     }
+                    WindowEvent::RedrawRequested => {
+                        let objects = self.data_model.all_objects();
+                        let aspect = self.renderer_aspect();
+                        let camera = camera_from_objects(&objects, aspect);
+                        let light = light_from_objects(&objects);
+                        self.renderer.update_globals(&camera, &light);
+                        if let Err(err) = self.renderer.render(&objects) {
+                            match err {
+                                wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
+                                    let size = self.renderer.window().inner_size();
+                                    self.renderer.resize(size);
+                                }
+                                wgpu::SurfaceError::OutOfMemory => {
+                                    return Err(anyhow!("GPU is out of memory"));
+                                }
+                                wgpu::SurfaceError::Timeout => {
+                                    info!("Surface timeout; retrying next frame");
+                                }
+                                wgpu::SurfaceError::Other => {
+                                    info!("Surface reported an unknown error; retrying next frame");
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
-            Event::RedrawRequested(window_id) if *window_id == self.renderer.window_id() => {
-                let objects = self.data_model.all_objects();
-                let aspect = self.renderer_aspect();
-                let camera = camera_from_objects(&objects, aspect);
-                let light = light_from_objects(&objects);
-                self.renderer.update_globals(&camera, &light);
-                if let Err(err) = self.renderer.render(&objects) {
-                    match err {
-                        wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
-                            let size = self.renderer.window().inner_size();
-                            self.renderer.resize(size);
-                        }
-                        wgpu::SurfaceError::OutOfMemory => {
-                            return Err(anyhow!("GPU is out of memory"));
-                        }
-                        wgpu::SurfaceError::Timeout => {
-                            info!("Surface timeout; retrying next frame");
-                        }
-                    }
-                }
-            }
-            Event::MainEventsCleared => {
+            Event::AboutToWait => {
                 self.renderer.window().request_redraw();
+            }
+            Event::LoopExiting => {
+                self.shutdown();
             }
             _ => {}
         }
@@ -285,24 +339,21 @@ impl AppState {
         }
     }
 
-    fn handle_keyboard(&self, input: &KeyboardInput) {
-        let Some(keycode) = input.virtual_keycode.and_then(map_keycode) else {
+    fn handle_keyboard(&self, event: &KeyEvent) {
+        let Some(keycode) = map_keycode(&event.physical_key) else {
             return;
         };
-        match input.state {
+        if event.repeat {
+            return;
+        }
+        match event.state {
             ElementState::Pressed => self.input.set_key_down(keycode),
             ElementState::Released => self.input.set_key_up(keycode),
         }
     }
 
     fn handle_mouse_button(&self, state: ElementState, button: WinitMouseButton) {
-        let index = match button {
-            WinitMouseButton::Left => 0,
-            WinitMouseButton::Right => 1,
-            WinitMouseButton::Middle => 2,
-            WinitMouseButton::Other(value) => value,
-        } as u8;
-        let button = crystal_runtime::MouseButton::new(index);
+        let button = map_mouse_button(button);
         match state {
             ElementState::Pressed => self.input.set_mouse_button_down(button),
             ElementState::Released => self.input.set_mouse_button_up(button),
@@ -319,145 +370,14 @@ impl AppState {
     }
 }
 
-fn print_final_state(model: &DataModel) {
-    println!("Final object states:");
-    for object in model.all_objects() {
-        println!(
-            " - {} pos=({:.2}, {:.2}, {:.2}) color=({:.2}, {:.2}, {:.2})",
-            object.name,
-            object.position.x,
-            object.position.y,
-            object.position.z,
-            object.color.x,
-            object.color.y,
-            object.color.z
-        );
-    }
-}
-
-fn map_keycode(code: winit::event::VirtualKeyCode) -> Option<KeyCode> {
-    use winit::event::VirtualKeyCode as Key;
-    Some(match code {
-        Key::Space => KeyCode::Named(NamedKey::Space),
-        Key::Return => KeyCode::Named(NamedKey::Enter),
-        Key::Tab => KeyCode::Named(NamedKey::Tab),
-        Key::Left => KeyCode::Named(NamedKey::Left),
-        Key::Right => KeyCode::Named(NamedKey::Right),
-        Key::Up => KeyCode::Named(NamedKey::Up),
-        Key::Down => KeyCode::Named(NamedKey::Down),
-        Key::Escape => KeyCode::Named(NamedKey::Escape),
-        Key::Back => KeyCode::Named(NamedKey::Backspace),
-        Key::Home => KeyCode::Named(NamedKey::Home),
-        Key::End => KeyCode::Named(NamedKey::End),
-        Key::PageUp => KeyCode::Named(NamedKey::PageUp),
-        Key::PageDown => KeyCode::Named(NamedKey::PageDown),
-        Key::LShift => KeyCode::Named(NamedKey::LeftShift),
-        Key::RShift => KeyCode::Named(NamedKey::RightShift),
-        Key::LControl => KeyCode::Named(NamedKey::LeftCtrl),
-        Key::RControl => KeyCode::Named(NamedKey::RightCtrl),
-        Key::LAlt => KeyCode::Named(NamedKey::LeftAlt),
-        Key::RAlt => KeyCode::Named(NamedKey::RightAlt),
-        Key::Key0 => KeyCode::Digit(0),
-        Key::Key1 => KeyCode::Digit(1),
-        Key::Key2 => KeyCode::Digit(2),
-        Key::Key3 => KeyCode::Digit(3),
-        Key::Key4 => KeyCode::Digit(4),
-        Key::Key5 => KeyCode::Digit(5),
-        Key::Key6 => KeyCode::Digit(6),
-        Key::Key7 => KeyCode::Digit(7),
-        Key::Key8 => KeyCode::Digit(8),
-        Key::Key9 => KeyCode::Digit(9),
-        Key::A => KeyCode::Character('A'),
-        Key::B => KeyCode::Character('B'),
-        Key::C => KeyCode::Character('C'),
-        Key::D => KeyCode::Character('D'),
-        Key::E => KeyCode::Character('E'),
-        Key::F => KeyCode::Character('F'),
-        Key::G => KeyCode::Character('G'),
-        Key::H => KeyCode::Character('H'),
-        Key::I => KeyCode::Character('I'),
-        Key::J => KeyCode::Character('J'),
-        Key::K => KeyCode::Character('K'),
-        Key::L => KeyCode::Character('L'),
-        Key::M => KeyCode::Character('M'),
-        Key::N => KeyCode::Character('N'),
-        Key::O => KeyCode::Character('O'),
-        Key::P => KeyCode::Character('P'),
-        Key::Q => KeyCode::Character('Q'),
-        Key::R => KeyCode::Character('R'),
-        Key::S => KeyCode::Character('S'),
-        Key::T => KeyCode::Character('T'),
-        Key::U => KeyCode::Character('U'),
-        Key::V => KeyCode::Character('V'),
-        Key::W => KeyCode::Character('W'),
-        Key::X => KeyCode::Character('X'),
-        Key::Y => KeyCode::Character('Y'),
-        Key::Z => KeyCode::Character('Z'),
-        Key::F1 => KeyCode::Function(1),
-        Key::F2 => KeyCode::Function(2),
-        Key::F3 => KeyCode::Function(3),
-        Key::F4 => KeyCode::Function(4),
-        Key::F5 => KeyCode::Function(5),
-        Key::F6 => KeyCode::Function(6),
-        Key::F7 => KeyCode::Function(7),
-        Key::F8 => KeyCode::Function(8),
-        Key::F9 => KeyCode::Function(9),
-        Key::F10 => KeyCode::Function(10),
-        Key::F11 => KeyCode::Function(11),
-        Key::F12 => KeyCode::Function(12),
-        _ => return None,
-    })
-}
-
-fn camera_from_objects(objects: &[SceneObject], aspect: f32) -> CameraParams {
-    let default_position = Vec3::new(0.0, 2.0, 6.0);
-    let default_target = Vec3::ZERO;
-    let (position, rotation, fov) = objects
-        .iter()
-        .find(|o| o.object_type == "camera")
-        .map(|camera| (camera.position, camera.rotation, camera.fov))
-        .unwrap_or((default_position, Vec3::ZERO, 60.0));
-
-    let rotation_matrix = Mat4::from_rotation_z(rotation.z.to_radians())
-        * Mat4::from_rotation_y(rotation.y.to_radians())
-        * Mat4::from_rotation_x(rotation.x.to_radians());
-    let forward = (rotation_matrix * Vec3::new(0.0, 0.0, -1.0).extend(0.0)).truncate();
-    let up = (rotation_matrix * Vec3::Y.extend(0.0)).truncate();
-    let target = if forward.length_squared() > f32::EPSILON {
-        position + forward.normalize()
-    } else {
-        default_target
-    };
-    let view = Mat4::look_at_rh(position, target, up);
-    let projection = Mat4::perspective_rh_gl(fov.to_radians(), aspect.max(0.01), 0.1, 100.0);
-    CameraParams {
-        view_proj: projection * view,
-        position,
-    }
-}
-
-fn light_from_objects(objects: &[SceneObject]) -> LightParams {
-    objects
-        .iter()
-        .find(|o| o.object_type == "light")
-        .map(|light| LightParams {
-            position: light.position,
-            color: light.color,
-            intensity: light.intensity.max(0.1),
-        })
-        .unwrap_or(LightParams {
-            position: Vec3::new(3.0, 5.0, -3.0),
-            color: Vec3::splat(1.0),
-            intensity: 1.0,
-        })
-}
-
+#[cfg(not(target_arch = "wasm32"))]
 struct CliOptions {
     path: String,
     run_scripts: bool,
     summary_only: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl CliOptions {
     fn parse() -> Result<Self> {
         let mut args = env::args().skip(1);
@@ -488,10 +408,12 @@ impl CliOptions {
 }
 
 #[derive(Debug)]
+#[cfg(not(target_arch = "wasm32"))]
 struct WindowViewport {
     size: RwLock<(u32, u32)>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl WindowViewport {
     fn new(width: u32, height: u32) -> Self {
         Self {
@@ -504,6 +426,7 @@ impl WindowViewport {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ViewportProvider for WindowViewport {
     fn viewport_size(&self) -> (u32, u32) {
         *self.size.read()
