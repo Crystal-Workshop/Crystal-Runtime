@@ -10,30 +10,7 @@ use crate::data_model::DataModel;
 use crate::input::InputState;
 
 use super::bindings::{register_globals, ScriptContext};
-
-/// Provides viewport dimensions for Lua scripts.
-pub trait ViewportProvider: Send + Sync {
-    fn viewport_size(&self) -> (u32, u32);
-}
-
-/// Simple viewport that always reports the same resolution.
-#[derive(Debug, Clone, Copy)]
-pub struct StaticViewport {
-    pub width: u32,
-    pub height: u32,
-}
-
-impl StaticViewport {
-    pub const fn new(width: u32, height: u32) -> Self {
-        Self { width, height }
-    }
-}
-
-impl ViewportProvider for StaticViewport {
-    fn viewport_size(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-}
+use super::common::ViewportProvider;
 
 /// Manages the lifecycle of Lua scripts embedded in a `.cgame` archive.
 pub struct LuaScriptManager {
@@ -175,6 +152,7 @@ mod tests {
     use crate::archive::CGameArchive;
     use crate::data_model::DataModel;
     use crate::scene::{Scene, SceneObject};
+    use crate::scripting::common::StaticViewport;
     use glam::Vec3;
     use once_cell::sync::Lazy;
     use tempfile::NamedTempFile;

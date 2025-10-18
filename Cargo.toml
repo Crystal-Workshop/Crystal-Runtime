@@ -44,3 +44,6 @@ js-sys = "0.3.77"
 wasm-bindgen = { version = "0.2.100", features = ["enable-interning"] }
 wasm-bindgen-futures = "0.4.50"
 web-sys = { version = "0.3.77", features = ["Document", "Element", "HtmlCanvasElement", "Window", "console"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "emscripten"))'.dependencies]
+mlua = { version = "0.9", features = ["luau", "vendored", "serialize"] }
