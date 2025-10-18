@@ -11,7 +11,7 @@ use mlua::{
 use crate::data_model::DataModel;
 use crate::input::InputState;
 
-use super::manager::ViewportProvider;
+use super::ViewportProvider;
 
 pub(super) struct ScriptContext {
     pub data_model: DataModel,

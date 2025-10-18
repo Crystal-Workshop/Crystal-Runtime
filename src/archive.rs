@@ -1,9 +1,16 @@
 use std::convert::TryFrom;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
+#[cfg(target_arch = "wasm32")]
+use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+#[cfg(not(target_arch = "wasm32"))]
+use anyhow::Context;
+use anyhow::{anyhow, Result};
 
 /// File entry extracted from the archive table of contents.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,13 +23,17 @@ pub struct ArchiveFileEntry {
 /// In-memory representation of a `.cgame` archive.
 #[derive(Debug, Clone)]
 pub struct CGameArchive {
+    #[cfg(not(target_arch = "wasm32"))]
     path: PathBuf,
     version: u32,
     files: Vec<ArchiveFileEntry>,
     scene_xml: String,
+    #[cfg(target_arch = "wasm32")]
+    data: Arc<Vec<u8>>,
 }
 
 impl CGameArchive {
+    #[cfg(not(target_arch = "wasm32"))]
     /// Opens an archive from disk and eagerly loads the scene XML blob.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
@@ -54,10 +65,44 @@ impl CGameArchive {
             parse_archive_bytes(&data, version_bytes, toc_bytes)?;
 
         Ok(Self {
+            #[cfg(not(target_arch = "wasm32"))]
             path: path_buf,
             version,
             files,
             scene_xml,
+            #[cfg(target_arch = "wasm32")]
+            data: Arc::new(Vec::new()),
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        if bytes.len() < 16 {
+            return Err(anyhow!(
+                "archive too small to contain header (len={})",
+                bytes.len()
+            ));
+        }
+
+        let magic = &bytes[..4];
+        if magic != b"CGME" {
+            return Err(anyhow!(
+                "invalid archive magic: expected CGME, found {:?}",
+                magic
+            ));
+        }
+
+        let version_bytes: [u8; 4] = bytes[4..8].try_into().expect("slice length verified");
+        let toc_bytes: [u8; 8] = bytes[8..16].try_into().expect("slice length verified");
+
+        let (_endian, version, _toc_offset, files, scene_xml) =
+            parse_archive_bytes(&bytes, version_bytes, toc_bytes)?;
+
+        Ok(Self {
+            version,
+            files,
+            scene_xml,
+            data: Arc::new(bytes),
         })
     }
 
@@ -90,6 +135,7 @@ impl CGameArchive {
     }
 
     /// Extracts the raw bytes for a previously looked-up entry.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn extract_entry(&self, entry: &ArchiveFileEntry) -> Result<Vec<u8>> {
         let mut file = File::open(&self.path)
             .with_context(|| format!("unable to reopen archive {}", self.path.display()))?;
@@ -99,6 +145,16 @@ impl CGameArchive {
         file.read_exact(&mut buffer)
             .with_context(|| format!("unable to read {} from archive", entry.name))?;
         Ok(buffer)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn extract_entry(&self, entry: &ArchiveFileEntry) -> Result<Vec<u8>> {
+        let start = entry.offset as usize;
+        let end = start + entry.size as usize;
+        let data = &self.data;
+        data.get(start..end)
+            .map(|slice| slice.to_vec())
+            .ok_or_else(|| anyhow!("invalid slice for entry {}", entry.name))
     }
 }
 

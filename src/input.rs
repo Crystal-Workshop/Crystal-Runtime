@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use glam::Vec2;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use winit::event::{MouseButton as WinitMouseButton, VirtualKeyCode};
 
 /// Identifier for a physical keyboard key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -103,6 +104,92 @@ impl MouseButton {
     pub fn index(self) -> u8 {
         self.0
     }
+}
+
+/// Maps a winit `VirtualKeyCode` to the internal [`KeyCode`] representation.
+pub fn map_virtual_keycode(code: VirtualKeyCode) -> Option<KeyCode> {
+    use VirtualKeyCode as Key;
+    Some(match code {
+        Key::Space => KeyCode::Named(NamedKey::Space),
+        Key::Return => KeyCode::Named(NamedKey::Enter),
+        Key::Tab => KeyCode::Named(NamedKey::Tab),
+        Key::Left => KeyCode::Named(NamedKey::Left),
+        Key::Right => KeyCode::Named(NamedKey::Right),
+        Key::Up => KeyCode::Named(NamedKey::Up),
+        Key::Down => KeyCode::Named(NamedKey::Down),
+        Key::Escape => KeyCode::Named(NamedKey::Escape),
+        Key::Back => KeyCode::Named(NamedKey::Backspace),
+        Key::Home => KeyCode::Named(NamedKey::Home),
+        Key::End => KeyCode::Named(NamedKey::End),
+        Key::PageUp => KeyCode::Named(NamedKey::PageUp),
+        Key::PageDown => KeyCode::Named(NamedKey::PageDown),
+        Key::LShift => KeyCode::Named(NamedKey::LeftShift),
+        Key::RShift => KeyCode::Named(NamedKey::RightShift),
+        Key::LControl => KeyCode::Named(NamedKey::LeftCtrl),
+        Key::RControl => KeyCode::Named(NamedKey::RightCtrl),
+        Key::LAlt => KeyCode::Named(NamedKey::LeftAlt),
+        Key::RAlt => KeyCode::Named(NamedKey::RightAlt),
+        Key::Key0 => KeyCode::Digit(0),
+        Key::Key1 => KeyCode::Digit(1),
+        Key::Key2 => KeyCode::Digit(2),
+        Key::Key3 => KeyCode::Digit(3),
+        Key::Key4 => KeyCode::Digit(4),
+        Key::Key5 => KeyCode::Digit(5),
+        Key::Key6 => KeyCode::Digit(6),
+        Key::Key7 => KeyCode::Digit(7),
+        Key::Key8 => KeyCode::Digit(8),
+        Key::Key9 => KeyCode::Digit(9),
+        Key::A => KeyCode::Character('A'),
+        Key::B => KeyCode::Character('B'),
+        Key::C => KeyCode::Character('C'),
+        Key::D => KeyCode::Character('D'),
+        Key::E => KeyCode::Character('E'),
+        Key::F => KeyCode::Character('F'),
+        Key::G => KeyCode::Character('G'),
+        Key::H => KeyCode::Character('H'),
+        Key::I => KeyCode::Character('I'),
+        Key::J => KeyCode::Character('J'),
+        Key::K => KeyCode::Character('K'),
+        Key::L => KeyCode::Character('L'),
+        Key::M => KeyCode::Character('M'),
+        Key::N => KeyCode::Character('N'),
+        Key::O => KeyCode::Character('O'),
+        Key::P => KeyCode::Character('P'),
+        Key::Q => KeyCode::Character('Q'),
+        Key::R => KeyCode::Character('R'),
+        Key::S => KeyCode::Character('S'),
+        Key::T => KeyCode::Character('T'),
+        Key::U => KeyCode::Character('U'),
+        Key::V => KeyCode::Character('V'),
+        Key::W => KeyCode::Character('W'),
+        Key::X => KeyCode::Character('X'),
+        Key::Y => KeyCode::Character('Y'),
+        Key::Z => KeyCode::Character('Z'),
+        Key::F1 => KeyCode::Function(1),
+        Key::F2 => KeyCode::Function(2),
+        Key::F3 => KeyCode::Function(3),
+        Key::F4 => KeyCode::Function(4),
+        Key::F5 => KeyCode::Function(5),
+        Key::F6 => KeyCode::Function(6),
+        Key::F7 => KeyCode::Function(7),
+        Key::F8 => KeyCode::Function(8),
+        Key::F9 => KeyCode::Function(9),
+        Key::F10 => KeyCode::Function(10),
+        Key::F11 => KeyCode::Function(11),
+        Key::F12 => KeyCode::Function(12),
+        _ => return None,
+    })
+}
+
+/// Maps a winit mouse button index into the internal [`MouseButton`].
+pub fn mouse_button_from_winit(button: WinitMouseButton) -> MouseButton {
+    let index = match button {
+        WinitMouseButton::Left => 0,
+        WinitMouseButton::Right => 1,
+        WinitMouseButton::Middle => 2,
+        WinitMouseButton::Other(value) => value,
+    } as u8;
+    MouseButton::new(index)
 }
 
 /// Thread-safe input snapshot shared with Lua scripts.

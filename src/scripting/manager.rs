@@ -97,6 +97,11 @@ impl LuaScriptManager {
         self.join_threads()
     }
 
+    /// Cooperative update hook used by single-threaded environments.
+    pub fn update(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     /// Requests that all scripts stop and waits for them to exit.
     pub fn stop(&mut self) -> Result<()> {
         self.running.store(false, Ordering::Release);
