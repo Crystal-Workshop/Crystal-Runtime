@@ -1,46 +1,22 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use log::warn;
+use mlua::{Lua, VmState};
 
 use crate::archive::{ArchiveFileEntry, CGameArchive};
 use crate::data_model::DataModel;
 use crate::input::InputState;
 
-/// Provides viewport dimensions for Lua scripts.
-pub trait ViewportProvider: Send + Sync {
-    fn viewport_size(&self) -> (u32, u32);
-}
+use super::bindings::{register_globals, ScriptContext};
+use super::common::ViewportProvider;
 
-/// Simple viewport that always reports the same resolution.
-#[derive(Debug, Clone, Copy)]
-pub struct StaticViewport {
-    pub width: u32,
-    pub height: u32,
-}
-
-impl StaticViewport {
-    pub const fn new(width: u32, height: u32) -> Self {
-        Self { width, height }
-    }
-}
-
-impl ViewportProvider for StaticViewport {
-    fn viewport_size(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-}
-
-/// Placeholder script manager for the Web build.
-///
-/// Browser WebAssembly environments do not currently ship with an embeddable
-/// Lua runtime, so scripts are skipped while still reporting the available
-/// entries to the host.
 pub struct LuaScriptManager {
     archive: Arc<CGameArchive>,
-    _data_model: DataModel,
-    _input_state: Arc<InputState>,
-    _viewport: Arc<dyn ViewportProvider + Send + Sync>,
+    data_model: DataModel,
+    input_state: Arc<InputState>,
+    viewport: Arc<dyn ViewportProvider + Send + Sync>,
+    running: Arc<AtomicBool>,
     launched: usize,
 }
 
@@ -53,14 +29,16 @@ impl LuaScriptManager {
     ) -> Self {
         Self {
             archive,
-            _data_model: data_model,
-            _input_state: input_state,
-            _viewport: viewport,
+            data_model,
+            input_state,
+            viewport,
+            running: Arc::new(AtomicBool::new(false)),
             launched: 0,
         }
     }
 
     pub fn start(&mut self) -> Result<usize> {
+        self.stop()?;
         let entries: Vec<ArchiveFileEntry> = self
             .archive
             .files()
@@ -69,24 +47,55 @@ impl LuaScriptManager {
             .cloned()
             .collect();
 
-        let skipped = entries.len();
-        if skipped == 0 {
+        if entries.is_empty() {
             self.launched = 0;
             return Ok(0);
         }
 
-        warn!(
-            "Lua scripting is not available in the WebAssembly build; skipping {} script(s)",
-            skipped
-        );
+        self.running.store(true, Ordering::Release);
+        let mut executed = 0usize;
+
         for entry in entries {
-            let _ = self
+            if !self.running.load(Ordering::Acquire) {
+                break;
+            }
+
+            let lua = Lua::new();
+            let interrupt_flag = Arc::clone(&self.running);
+            lua.set_interrupt(move |_| {
+                if !interrupt_flag.load(Ordering::Acquire) {
+                    Err(mlua::Error::RuntimeError("script stopped by host".into()))
+                } else {
+                    Ok(VmState::Continue)
+                }
+            });
+
+            let context = ScriptContext::new(
+                self.data_model.clone(),
+                Arc::clone(&self.input_state),
+                Arc::clone(&self.viewport),
+                Arc::clone(&self.running),
+            );
+            register_globals(&lua, &context)?;
+
+            let source = self
                 .archive
                 .extract_entry(&entry)
                 .with_context(|| format!("failed to extract {}", entry.name))?;
+            let script = String::from_utf8(source)
+                .with_context(|| format!("{} is not UTF-8", entry.name))?;
+
+            lua.load(&script)
+                .set_name(&entry.name)
+                .exec()
+                .with_context(|| format!("Lua runtime error in {}", entry.name))?;
+
+            executed += 1;
         }
-        self.launched = 0;
-        Ok(skipped)
+
+        self.launched = executed;
+        self.running.store(false, Ordering::Release);
+        Ok(self.launched)
     }
 
     pub fn wait(&mut self) -> Result<()> {
@@ -94,6 +103,7 @@ impl LuaScriptManager {
     }
 
     pub fn stop(&mut self) -> Result<()> {
+        self.running.store(false, Ordering::Release);
         Ok(())
     }
 }

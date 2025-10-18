@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use glam::{Vec2, Vec3};
@@ -11,7 +12,7 @@ use mlua::{
 use crate::data_model::DataModel;
 use crate::input::InputState;
 
-use super::native::ViewportProvider;
+use super::common::ViewportProvider;
 
 pub(super) struct ScriptContext {
     pub data_model: DataModel,
@@ -102,6 +103,7 @@ fn register_print(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn register_wait(lua: &Lua, running: Arc<AtomicBool>) -> LuaResult<()> {
     let wait_running = Arc::clone(&running);
     let wait = lua.create_function(move |_, millis: Option<u64>| {
@@ -118,6 +120,19 @@ fn register_wait(lua: &Lua, running: Arc<AtomicBool>) -> LuaResult<()> {
             let sleep = remaining.min(CHUNK);
             std::thread::sleep(Duration::from_millis(sleep));
             remaining -= sleep;
+        }
+        Ok(())
+    })?;
+    lua.globals().set("wait", wait)?;
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn register_wait(lua: &Lua, running: Arc<AtomicBool>) -> LuaResult<()> {
+    let wait_running = Arc::clone(&running);
+    let wait = lua.create_function(move |_, _millis: Option<u64>| {
+        if !wait_running.load(Ordering::Acquire) {
+            return Err(mlua::Error::RuntimeError("wait interrupted".into()));
         }
         Ok(())
     })?;
